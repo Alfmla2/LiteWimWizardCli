@@ -6,8 +6,6 @@ A graphical launcher (`WimWizard-GUI.ps1`) provides a clean interface for config
 
 Inspired by [WIM Witch](https://msendpointmgr.com/wim-witch/) by Donna Ryan.
 
-<img width="765" height="660" alt="image" src="https://github.com/user-attachments/assets/a3dfa6d5-7679-4a2a-9021-c4cc86474a10" />
-
 ## Features
 
 - **Full image build** — Services a Windows 11 Enterprise WIM from a source ISO: language packs, FOD packages, cumulative updates (.NET, SafeOS/WinRE), and Appx removal
