@@ -4,7 +4,8 @@
     WIM Wizard - Windows 11 x64 Image Servicing Tool
 
 .DESCRIPTION
-    Services a Windows 11 25H2/24H2 x64 WIM file: mounts Windows ISO + LP ISO,
+    Services a Windows 11 25H2/24H2 x64 WIM file: uses install.wim/esd from specified folder,
+    uses LanguagesAndOptionalFeatures folder for language packs and FoDs,
     auto-selects Enterprise, downloads LCU + checkpoint (KB5043080) + .NET CU,
     injects language packs and FoDs, removes provisioned Appx, applies offline
     Defender update, exports and compresses the finished WIM.
@@ -12,11 +13,11 @@
     Patch mode (-PatchExistingWim) applies only LCU + checkpoint + .NET CU to
     an existing WIM.
 
-.PARAMETER SourceFolder
-    Folder with the ISO files. Default: <ScriptFolder>\ISO-Source
+.PARAMETER WimEsdPath
+    Path to folder containing install.wim or install.esd. Default: <ScriptFolder>\WimEsd
 
-.PARAMETER WindowsISOPath
-    Optional explicit path to the Windows OS ISO (bypasses filename auto-detection).
+.PARAMETER LanguagesAndOptionalFeaturesPath
+    Path to LanguagesAndOptionalFeatures folder containing language packs and FoD packages. Default: <ScriptFolder>\LanguagesAndOptionalFeatures
 
 .PARAMETER UpdatePath
     Manual override for update files (.msu/.cab). Empty = auto-download.
@@ -32,7 +33,7 @@
     -Unattended with no -Languages = English-only build.
 
 .PARAMETER FoDList
-    Comma-separated FoD keys: NetFx3, RsatAD, RsatGPO, RsatSrvMgr.
+    Comma-separated FoD keys: .
 
 .PARAMETER DriverPath
     Root folder to recurse for driver .inf packages to inject (full build only).
@@ -81,8 +82,8 @@
 [CmdletBinding()]
 param(
     [switch]$Help,
-    [string]$SourceFolder     = "",
-    [string]$WindowsISOPath   = "",
+    [string]$WimEsdPath         = "",
+    [string]$LanguagesAndOptionalFeaturesPath = "",
     [string]$UpdatePath,
     [string]$OutputPath,
     [int]   $WimIndex         = 0,
@@ -106,7 +107,7 @@ $ScriptVersion    = "6.2.0"
 $MinFreeSpaceGB   = 30
 $Architecture     = "x64"
 
-if ($SourceFolder -eq '/?') { $Help = $true; $SourceFolder = "" }
+if ($WimEsdPath -eq '/?') { $Help = $true; $WimEsdPath = "" }
 
 if ($Help) {
     Write-Host ""
@@ -118,30 +119,34 @@ if ($Help) {
     Write-Host "    .\WimWizard.ps1"
     Write-Host ""
     Write-Host "  Full build (unattended, 4 Nordic languages):"
-    Write-Host "    .\WimWizard.ps1 -Languages `"da,fi,no,se`" -Unattended"
+    Write-Host "    .\WimWizard.ps1 -Languages `"ru`" -Unattended"
     Write-Host ""
     Write-Host "  Full build with Features on Demand:"
-    Write-Host "    .\WimWizard.ps1 -Languages `"da,fi,no,se`" -FoDList `"NetFx3,RsatAD`" -Unattended"
+    Write-Host "    .\WimWizard.ps1 -Languages `"ru`" -FoDList `"PowerShell-ISE`" -Unattended"
     Write-Host ""
     Write-Host "  Full build with driver injection:"
-    Write-Host "    .\WimWizard.ps1 -Languages `"da,fi,no,se`" -DriverPath `"\\dfs\Drivers\Latitude5540`" -Unattended"
+    Write-Host "    .\WimWizard.ps1 -Languages `"ru`" -DriverPath `"\\dfs\Drivers\Latitude5540`" -Unattended"
     Write-Host ""
-    Write-Host "  Patch existing WIM (updates only):"
-    Write-Host "    .\WimWizard.ps1 -PatchExistingWim `"Output\Win11_25H2_..._20260409.wim`""
+    Write-Host "  Patches:"
+    Write-Host "      .\WimWizard.ps1 -Languages `"ru`" -WimEsdPath `"D:\WimEsd"` -LanguagesAndOptionalFeaturesPath `"D:\LanguagesAndOptionalFeatures"` -Unattended"
     Write-Host ""
     Write-Host "  Build using manually downloaded updates:"
-    Write-Host "    .\WimWizard.ps1 -Languages `"da,fi,no,se`" -UpdatePath `"C:\Updates\`" -Unattended"
+    Write-Host "    .\WimWizard.ps1 -Languages `"ru`" -UpdatePath `"C:\Updates\`" -Unattended"
     Write-Host ""
     Write-Host "  PARAMETERS" -ForegroundColor White
     Write-Host "  ----------"
-    Write-Host "  -SourceFolder     <path>   Folder with Windows ISO + LP ISO (default: .\ISO-Source\)"
-    Write-Host "  -Languages        <codes>  Comma-separated language codes: da,fi,no,se,de,fr ..."
+    Write-Host "  -WimEsdPath       <path>   Folder containing install.wim or install.esd"
+    Write-Host "                             (default: <ScriptRoot>\WimEsd\)"
+    Write-Host "  -LanguagesAndOptionalFeaturesPath <path>"
+    Write-Host "                             Folder with LP and FoD cab files"
+    Write-Host "                             (default: <ScriptRoot>\LanguagesAndOptionalFeatures\)"
+    Write-Host "  -Languages        <codes>  Comma-separated language codes: ru,fr ..."
     Write-Host "  -OutputPath       <path>   Output WIM path (folder or folder\file.wim)"
     Write-Host "  -UpdatePath       <path>   Folder with pre-downloaded .msu/.cab files"
     Write-Host "  -PatchExistingWim <path>   Patch this WIM with latest updates only"
     Write-Host "  -AppxListPath     <path>   XML app removal list (from GUI)"
     Write-Host "  -WimIndex         <int>    WIM index (default: 0 = auto-detect Enterprise)"
-    Write-Host "  -FoDList          <keys>   NetFx3,RsatAD,RsatGPO,RsatSrvMgr"
+    Write-Host "  -FoDList          <keys>   PowerShell-ISE,SnippingTool"
     Write-Host "  -DriverPath       <path>   Root folder to recurse for driver .inf packages"
     Write-Host "  -DriverListPath   <path>   XML of pre-selected driver INFs (from GUI)"
     Write-Host "  -SkipUpdates               Do not download or apply updates"
@@ -159,7 +164,8 @@ $ScriptRoot = $PSScriptRoot
 if (-not $ScriptRoot) { $ScriptRoot = Split-Path -Parent $MyInvocation.MyCommand.Path }
 Write-Verbose "Script root: $ScriptRoot"
 
-if (-not $SourceFolder) { $SourceFolder = "$ScriptRoot\ISO-Source" }
+if (-not $WimEsdPath) { $WimEsdPath = "$ScriptRoot\WimEsd" }
+if (-not $LanguagesAndOptionalFeaturesPath) { $LanguagesAndOptionalFeaturesPath = "$ScriptRoot\LanguagesAndOptionalFeatures" }
 if (-not $OutputPath)   { $OutputPath   = "$ScriptRoot\Output\install.wim" }
 
 $LocaleMap = @{
@@ -182,6 +188,10 @@ function Write-Warn     { param([string]$msg) Write-Host "  [!]   $msg" -Foregro
 function Write-Info     { param([string]$msg) Write-Host "  [i]   $msg" -ForegroundColor Cyan }
 function Write-Fail     { param([string]$msg) Write-Host "  [ERR] $msg" -ForegroundColor Red }
 function Write-DiskWarn { param([string]$msg) Write-Host "  [!]   $msg" -ForegroundColor DarkYellow }
+
+# No-op stub: ISO mounting removed in v6.3.0. Function kept so existing
+# call sites (trap, catch, early exits) continue to work without changes.
+function Dismount-AllISOs { }
 
 function Get-FreeSpaceGB {
     param([string]$Path)
@@ -390,7 +400,7 @@ trap {
     Write-Host ""; Write-Fail "Unhandled error: $($_.Exception.Message)"
     Dismount-AllISOs; break
 }
-function Exit-Script { param([int]$Code = 0) Dismount-AllISOs; exit $Code }
+
 
 $CatalogSearchTerms = $null
 
@@ -489,110 +499,71 @@ $AppxToRemoveDefault = @(
 )
 $AppxToRemove = $AppxToRemoveDefault
 
-# ── ISO discovery and mounting (x64 only) ─────────────────────────────────────
-$script:MountedISOs = @()
+# ── WIM/ESD discovery from folder ─────────────────────────────────────────────
+function Resolve-WimEsdFolder {
+    param(
+        [Parameter(Mandatory)][string]$Folder,
+        [string]$LanguagesAndOptionalFeaturesPath = ""
+    )
 
-function Mount-ISOSafe {
-    param([string]$IsoPath)
-    $result = Mount-DiskImage -ImagePath $IsoPath -PassThru
-    $letter = ($result | Get-Volume).DriveLetter + ":"
-    $script:MountedISOs += $IsoPath
-    return $letter
-}
-function Dismount-AllISOs {
-    foreach ($iso in $script:MountedISOs) {
-        try { Dismount-DiskImage -ImagePath $iso -ErrorAction SilentlyContinue | Out-Null } catch {}
+    if (-not (Test-Path -LiteralPath $Folder)) {
+        Write-Warn "WIM/ESD folder not found: $Folder"
+        return $null
     }
-    $script:MountedISOs = @()
-}
 
-function Resolve-SourceFolder {
-    param([string]$Folder, [switch]$SkipLP)
+    Write-Info "Scanning $Folder for install.wim or install.esd..."
 
-    $isoFiles = @(Get-ChildItem $Folder -ErrorAction SilentlyContinue | Where-Object { $_.Extension -match "^\.iso$" })
-    if (-not $isoFiles -or $isoFiles.Count -eq 0) { return $null }
-    Write-Info "Found $($isoFiles.Count) ISO file(s) in $($Folder):"
-    $isoFiles | ForEach-Object { Write-Host "    $($_.Name)" -ForegroundColor DarkGray }
+    # Search directly first, then recursively
+    $wimFile = Get-ChildItem -LiteralPath $Folder -Filter "install.wim" -ErrorAction SilentlyContinue |
+               Select-Object -First 1
+    if (-not $wimFile) {
+        $wimFile = Get-ChildItem -LiteralPath $Folder -Filter "install.esd" -ErrorAction SilentlyContinue |
+                   Select-Object -First 1
+    }
+    if (-not $wimFile) {
+        Write-Info "Searching recursively..."
+        $wimFile = Get-ChildItem -LiteralPath $Folder -Filter "install.wim" -Recurse -ErrorAction SilentlyContinue |
+                   Select-Object -First 1
+        if (-not $wimFile) {
+            $wimFile = Get-ChildItem -LiteralPath $Folder -Filter "install.esd" -Recurse -ErrorAction SilentlyContinue |
+                       Select-Object -First 1
+        }
+    }
+    if (-not $wimFile) {
+        Write-Warn "No install.wim or install.esd found in: $Folder"
+        return $null
+    }
+    Write-OK "Found WIM/ESD: $($wimFile.FullName)"
 
-    $result = @{ WimFile = $null; WimISO = $null; LPSearchRoot = $null; FODSearchRoot = $null }
-
-    $explicitWindowsISO = $null
-    if ($WindowsISOPath) {
-        if (Test-Path -LiteralPath $WindowsISOPath -PathType Leaf) {
-            $explicitWindowsISO = Get-Item -LiteralPath $WindowsISOPath
+    # ── Resolve LP/FoD source (independent from WIM folder) ─────────────────
+    # Priority:
+    #   1. Explicit -LanguagesAndOptionalFeaturesPath
+    #   2. Auto-detect <WimFolder>\LanguagesAndOptionalFeatures
+    #   3. Fallback to WimFolder (so later code doesn't crash on null)
+    $lpRoot = $null
+    if ($LanguagesAndOptionalFeaturesPath -and (Test-Path -LiteralPath $LanguagesAndOptionalFeaturesPath)) {
+        $lpRoot = $LanguagesAndOptionalFeaturesPath
+        Write-OK "LP/FoD source (explicit): $lpRoot"
+    } else {
+        if ($LanguagesAndOptionalFeaturesPath) {
+            Write-Warn "LanguagesAndOptionalFeaturesPath not found: $LanguagesAndOptionalFeaturesPath"
+        }
+        $autoSub = Join-Path $Folder "LanguagesAndOptionalFeatures"
+        if (Test-Path -LiteralPath $autoSub) {
+            $lpRoot = $autoSub
+            Write-OK "LP/FoD source (auto-detected): $lpRoot"
         } else {
-            Write-Warn "-WindowsISOPath '$WindowsISOPath' not found - falling back to auto-detection in $Folder"
+            Write-Warn "No LanguagesAndOptionalFeatures folder found (explicit path missing, auto-detect failed)."
+            Write-Warn "LP/FoD injection will likely fail. Set -LanguagesAndOptionalFeaturesPath explicitly."
+            $lpRoot = $Folder   # fallback so later code doesn't crash on null
         }
     }
 
-    if ($explicitWindowsISO) {
-        Write-Info "Mounting explicitly specified Windows ISO: $($explicitWindowsISO.Name)"
-        try {
-            $drive   = Mount-ISOSafe -IsoPath $explicitWindowsISO.FullName
-            $wimPath = "$drive\sources\install.wim"
-            if (-not (Test-Path $wimPath)) { $wimPath = "$drive\sources\install.esd" }
-            if (Test-Path $wimPath) {
-                $result.WimFile = $wimPath
-                $result.WimISO  = $explicitWindowsISO.FullName
-                Write-OK "Windows ISO mounted as ${drive} - $wimPath"
-            } else {
-                Write-Warn "Mounted $($explicitWindowsISO.Name) but no install.wim/esd found"
-            }
-        } catch { Write-Warn "Could not mount $($explicitWindowsISO.Name): $_" }
+    return @{
+        WimFile       = $wimFile.FullName
+        LPSearchRoot  = $lpRoot
+        FODSearchRoot = $lpRoot
     }
-
-    foreach ($iso in $isoFiles) {
-        $name = $iso.Name.ToLower()
-        $isLPISO = (
-            $name -match "langpack" -or $name -match "language.?pack" -or
-            $name -match "lang_pack" -or $name -match "_lp_"
-        )
-
-        $isWindowsISO = (
-            -not $isLPISO -and -not $explicitWindowsISO
-        ) -and (
-            $name -match "win_pro_11" -or
-            $name -match "win.*11.*ent" -or
-            $name -match "win.*11.*business" -or
-            $name -match "win.*ltsc" -or
-            $name -match "insiderpreview"
-        )
-
-        if ($isWindowsISO -and -not $result.WimFile) {
-            Write-Info "Mounting Windows ISO: $($iso.Name)"
-            try {
-                $drive   = Mount-ISOSafe -IsoPath $iso.FullName
-                $wimPath = "$drive\sources\install.wim"
-                if (-not (Test-Path $wimPath)) { $wimPath = "$drive\sources\install.esd" }
-                if (Test-Path $wimPath) {
-                    $result.WimFile = $wimPath
-                    $result.WimISO  = $iso.FullName
-                    Write-OK "Windows ISO mounted as ${drive} - $wimPath"
-                } else {
-                    Write-Warn "Mounted $($iso.Name) but no install.wim/esd found - skipping"
-                }
-            } catch { Write-Warn "Could not mount $($iso.Name): $_" }
-        } elseif ($isLPISO -and -not $result.LPSearchRoot) {
-            if ($SkipLP) { Write-Info "Skipping Language Pack ISO (language packs disabled)" }
-            else {
-                Write-Info "Mounting Language Pack ISO: $($iso.Name)"
-                try {
-                    $drive = Mount-ISOSafe -IsoPath $iso.FullName
-                    $lpFodSubfolder = "$drive\LanguagesAndOptionalFeatures"
-                    if (Test-Path $lpFodSubfolder) {
-                        $result.LPSearchRoot  = $lpFodSubfolder
-                        $result.FODSearchRoot = $lpFodSubfolder
-                        Write-OK "LP ISO mounted as ${drive}, using subfolder: LanguagesAndOptionalFeatures"
-                    } else {
-                        $result.LPSearchRoot  = $drive
-                        $result.FODSearchRoot = $drive
-                        Write-OK "LP ISO mounted as $($drive) (searching root)"
-                    }
-                } catch { Write-Warn "Could not mount $($iso.Name): $_" }
-            }
-        }
-    }
-    return $result
 }
 
 # ── MSCatalogLTS / update download ────────────────────────────────────────────
@@ -914,93 +885,39 @@ if ($PatchMode) {
     $CatalogSearchTerms = Get-CatalogSearchTerms -WimVersion $patchWimInfo.Version
     $LPSearchRoot    = $null
     $FODSearchRoot   = $null
-    $wimISOPath      = $null
-
 } else {
 
     Write-Section "Step 1/4 - Source folder"
     Write-Host ""
-    Write-Host "  Place the required ISO file(s) in a single folder, e.g. $($ScriptRoot)\ISO-Source\" -ForegroundColor White
-    Write-Host ""
-    Write-Host "  [1] Windows 11 Enterprise 25H2 ISO (x64)" -ForegroundColor Yellow
-    Write-Host "      SW_DVD9_Win_Pro_11_25H2_64BIT_English_Pro_Ent_EDU_N_MLF_*.ISO" -ForegroundColor DarkGray
-    Write-Host "      Insider Preview: Windows11_InsiderPreview_Client_x64_en-us_BUILD_REV.ISO" -ForegroundColor DarkGray
+    Write-Host "  WIM/ESD source folder:" -ForegroundColor White
+    Write-Host "    Contains install.wim or install.esd" -ForegroundColor DarkGray
     Write-Host ""
 
-    $needLPISOHint = -not $SkipLanguagePacks -or $FoDList -ne ""
-    if ($needLPISOHint) {
-        Write-Host "  [2] Language Pack ISO (x64; contains all FOD packages)" -ForegroundColor Yellow
-        Write-Host "      SW_DVD9_Win_11_24H2_25H2_x64_MultiLang_LangPackAll_LIP_LoF_*.ISO" -ForegroundColor DarkGray
-        Write-Host ""
-        Write-Host "  Download both ISOs from the Microsoft 365 Admin Center:" -ForegroundColor White
-    } else {
-        Write-Host "  (Language Pack ISO not required - language pack injection is disabled)" -ForegroundColor DarkGray
-        Write-Host ""
-        Write-Host "  Download the Windows ISO from the Microsoft 365 Admin Center:" -ForegroundColor White
-    }
-    Write-Host "  https://admin.microsoft.com/adminportal/home#/subscriptions/vlnew/downloadsandkeys" -ForegroundColor Cyan
-    Write-Host "  Sign in -> Downloads & Keys -> Windows 11 Enterprise -> 25H2" -ForegroundColor DarkGray
-    Write-Host ""
-
-    if (-not (Test-Path $SourceFolder)) {
-        if ($SourceFolder -match '^[A-Za-z]:\\' -and $SourceFolder -notmatch '^[Cc]:\\') {
-            $driveLetter = $SourceFolder.Substring(0, 2)
-            if (-not (Test-Path $driveLetter)) {
-                Write-Host ""
-                Write-Warn "Drive $driveLetter is not available in this elevated session."
-                Write-Host ""
-                Write-Host "  This usually means $driveLetter is a mapped network drive." -ForegroundColor Yellow
-                Write-Host "  Elevated sessions do not inherit user-mapped drives." -ForegroundColor Yellow
-                Write-Host ""
-                Write-Host "  Solutions:" -ForegroundColor White
-                Write-Host "    1. Use a UNC path instead:  \\\\server\\share\\ISO-folder" -ForegroundColor Cyan
-                Write-Host "    2. Remap the drive in an elevated prompt: net use $driveLetter \\\\server\\share /persistent:no" -ForegroundColor Cyan
-                Write-Host "    3. Copy the ISOs to a local folder (e.g. C:\WimWizard\ISO-Source)" -ForegroundColor Cyan
-                Write-Host ""
-                Dismount-AllISOs; exit 1
-            }
-        }
-        $SourceFolder = Read-PathWithDefault `
-            -Prompt  "Path to folder containing the two ISO files:" `
-            -Default "$ScriptRoot\ISO-Source" `
+    if (-not (Test-Path $WimEsdPath)) {
+        $WimEsdPath = Read-PathWithDefault `
+            -Prompt  "Path to folder containing install.wim or install.esd:" `
+            -Default "$ScriptRoot\WimEsd" `
             -MustExist
-        if (-not $SourceFolder) { exit 1 }
+        if (-not $WimEsdPath) { exit 1 }
     }
 
-    Write-Info "Scanning $SourceFolder for ISO files..."
-    $needLPISO  = -not $SkipLanguagePacks -or $FoDList -ne ""
-    $discovered = Resolve-SourceFolder -Folder $SourceFolder -SkipLP:(-not $needLPISO)
+    Write-Info "Scanning $WimEsdPath for install.wim or install.esd..."
+    $wimEsdDiscovered = Resolve-WimEsdFolder -Folder $WimEsdPath `
+        -LanguagesAndOptionalFeaturesPath $LanguagesAndOptionalFeaturesPath
 
     $wimFile       = $null
-    $wimISOPath    = $null
     $LPSearchRoot  = $null
     $FODSearchRoot = $null
 
-    if ($discovered) {
-        $wimFile       = $discovered.WimFile
-        $wimISOPath    = $discovered.WimISO
-        $LPSearchRoot  = $discovered.LPSearchRoot
-        $FODSearchRoot = $discovered.FODSearchRoot
-        if (-not $LPSearchRoot) {
-            if (-not $SkipLanguagePacks) { Write-Warn "No Language Pack ISO found in $SourceFolder" }
-            $LPSearchRoot  = $SourceFolder
-            $FODSearchRoot = $SourceFolder
-        }
+    if ($wimEsdDiscovered) {
+        $wimFile       = $wimEsdDiscovered.WimFile
+        $LPSearchRoot  = $wimEsdDiscovered.LPSearchRoot
+        $FODSearchRoot = $wimEsdDiscovered.FODSearchRoot
     } else {
-        Write-Warn "No ISO files found in $SourceFolder - looking for install.wim/esd directly..."
-        $found = Get-ChildItem $SourceFolder -Filter "install.wim" -Recurse | Select-Object -First 1
-        if (-not $found) { $found = Get-ChildItem $SourceFolder -Filter "install.esd" -Recurse | Select-Object -First 1 }
-        if ($found) {
-            $wimFile       = $found.FullName
-            $LPSearchRoot  = $SourceFolder
-            $FODSearchRoot = $SourceFolder
-            Write-OK "Found WIM directly: $wimFile"
-        } else {
-            Write-Fail "No ISO files and no install.wim/esd found in: $SourceFolder"
-            Write-Host ""
-            Write-Host "  Make sure you have placed the required ISO file(s) in the folder." -ForegroundColor Yellow
-            Dismount-AllISOs; exit 1
-        }
+        Write-Fail "No install.wim or install.esd found in: $WimEsdPath"
+        Write-Host ""
+        Write-Host "  Make sure install.wim or install.esd is present in the folder." -ForegroundColor Yellow
+        exit 1
     }
 
     if (-not $wimFile -or -not (Test-Path $wimFile)) {
@@ -1096,9 +1013,12 @@ if (-not $SkipLanguagePacks) {
     }
     if ($anyMissing) {
         Write-Host ""
-        Write-Fail "Language Pack ISO not found or missing cab files in: $SourceFolder"
+        Write-Fail "Language pack or FoD cab files missing in: $LPSearchRoot"
         Write-Host ""
-        Write-Host "  The Language Pack ISO must be present in the source folder." -ForegroundColor Yellow
+        Write-Host "  The LanguagesAndOptionalFeatures folder must contain the .cab files." -ForegroundColor Yellow
+        Write-Host "  Set -LanguagesAndOptionalFeaturesPath explicitly, or place the folder" -ForegroundColor White
+        Write-Host "  next to install.wim (auto-detected as <WimFolder>\LanguagesAndOptionalFeatures)." -ForegroundColor White
+        Write-Host ""
         Write-Host "  Download from the Microsoft 365 Admin Center:" -ForegroundColor White
         Write-Host "  https://admin.microsoft.com/adminportal/home#/subscriptions/vlnew/downloadsandkeys" -ForegroundColor Cyan
         Write-Host ""
@@ -1307,9 +1227,8 @@ if ($PatchMode) {
     Write-Host "    Mode          : PATCH (existing WIM - no LP/Appx changes)" -ForegroundColor Yellow
     Write-Host "    Source WIM    : $PatchExistingWim" -ForegroundColor Cyan
 } else {
-    Write-Host "    Source folder : $SourceFolder" -ForegroundColor Cyan
-    if ($wimISOPath) { Write-Host "    Windows ISO   : $wimISOPath" -ForegroundColor Cyan }
-    Write-Host "    WIM source    : $wimFile" -ForegroundColor Cyan
+    Write-Host "    WIM/ESD source : $WimEsdPath" -ForegroundColor Cyan
+    Write-Host "    WIM file       : $wimFile" -ForegroundColor Cyan
 }
 Write-Host "    Edition       : [$WimIndex] $($chosenImage.ImageName)" -ForegroundColor Cyan
 
@@ -1397,7 +1316,8 @@ if (-not $SkipAppxRemoval) {
 
 # Cut-pasteable command line for the log
 $_cmdParts = @(".\WimWizard.ps1")
-if ($SourceFolder)     { $_cmdParts += "-SourceFolder `"$SourceFolder`"" }
+if ($WimEsdPath)       { $_cmdParts += "-WimEsdPath `"$WimEsdPath`"" }
+if ($LanguagesAndOptionalFeaturesPath) { $_cmdParts += "-LanguagesAndOptionalFeaturesPath `"$LanguagesAndOptionalFeaturesPath`"" }
 if ($OutputPath)       { $_cmdParts += "-OutputPath `"$OutputPath`"" }
 if ($WimIndex -ne 0)   { $_cmdParts += "-WimIndex $WimIndex" }
 if ($Languages)        { $_cmdParts += "-Languages `"$Languages`"" }
@@ -1414,7 +1334,7 @@ if ($SkipDefenderUpdate) { $_cmdParts += "-SkipDefenderUpdate" }
 if ($Unattended)       { $_cmdParts += "-Unattended" }
 if ($DebugBuild)       { $_cmdParts += "-DebugBuild" }
 Write-Log ($_cmdParts -join " ")
-Write-Log "Source: $SourceFolder  WIM: $wimFile  Index: $WimIndex  Edition: $($chosenImage.ImageName)"
+Write-Log "WIM/ESD source: $WimEsdPath  WIM: $wimFile  Index: $WimIndex  Edition: $($chosenImage.ImageName)"
 Write-Log "Work folder: $workRoot"
 
 # ── Defender kit (KB4568292) ──────────────────────────────────────────────────
@@ -1449,7 +1369,6 @@ function Initialize-DefenderKit {
     if (-not (Test-Path -LiteralPath $CacheDir)) { New-Item $CacheDir -ItemType Directory -Force | Out-Null }
 
     $zipPath = Join-Path $CacheDir "defender-update-kit-$ArchTag.zip"
-    $fresh   = $false
 
     if (Test-Path -LiteralPath $zipPath) {
         # Использовать кэш без перезагрузки. Microsoft refreshes the zip in place
@@ -1476,7 +1395,6 @@ function Initialize-DefenderKit {
             try { $b0 = $fs.ReadByte(); $b1 = $fs.ReadByte() } finally { $fs.Dispose() }
             if ($b0 -ne 0x50 -or $b1 -ne 0x4B) { throw "downloaded file is not a ZIP archive" }
             Move-Item -LiteralPath $tmpPath -Destination $zipPath -Force
-            $fresh = $true
             $mb = [math]::Round((Get-Item -LiteralPath $zipPath).Length / 1MB, 0)
             Write-OK "Defender kit downloaded ($mb MB)"
             Write-Log "Defender kit downloaded: $zipPath ($mb MB)"
