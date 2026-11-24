@@ -36,3 +36,6 @@ desktop.ini
 # Editor files
 .vscode/
 *.code-workspace
+
+# cabs
+*.cab
