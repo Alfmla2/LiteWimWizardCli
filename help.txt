@@ -1,0 +1,69 @@
+﻿[C]  WIM Wizard v{{VERSION}}
+[C]
+[W]  USAGE
+[W]  -----
+  Interactive full build:
+    .\WimWizard.ps1
+
+  Unattended full build (Russian):
+    .\WimWizard.ps1 -Languages "ru" -Unattended
+
+  Unattended full build (Russian + FoDs):
+    .\WimWizard.ps1 -Languages "ru" -FoDList "PowerShell-ISE,Wifi" -Unattended
+
+  Full build with explicit paths:
+    .\WimWizard.ps1 -Languages "ru" `
+      -WimEsdPath "D:\WimEsd" `
+      -LanguagesAndOptionalFeaturesPath "D:\LanguagesAndOptionalFeatures" `
+      -OutputPath "W:\out" -WorkPath "W:\work" `
+      -Unattended
+
+  Full build with driver injection:
+    .\WimWizard.ps1 -Languages "ru" -DriverPath "D:\Drivers\Laptop" -Unattended
+
+  Offline build with pre-downloaded updates:
+    .\WimWizard.ps1 -Languages "ru" -UpdatePath "C:\Updates" -Unattended
+
+  Update-only build (apply LCU + .NET CU to an existing WIM):
+    .\WimWizard.ps1 -WimFilePath "D:\Custom\my-image.wim" `
+      -SkipLanguagePacks -SkipAppxRemoval -SkipDefenderUpdate -Unattended
+
+[W]  PARAMETERS
+[W]  ----------
+  -WimEsdPath       <path>   Folder containing install.wim/install.esd
+                             (default: <ScriptRoot>\WimEsd\)
+  -WimFilePath      <path>   Explicit path to a .wim/.esd (overrides folder search)
+  -LanguagesAndOptionalFeaturesPath <path>
+                             Folder with LP and FoD cab files
+                             (default: <ScriptRoot>\LanguagesAndOptionalFeatures\)
+  -Languages        <codes>  Comma-separated 2-letter codes (e.g. ru, de, fr)
+  -OutputPath       <path>   Output WIM (folder = auto-name, or full path with .wim)
+  -WorkPath         <path>   Work folder for mount + scratch
+                             (default: <outputDir>\WIMServicing_Work)
+  -UpdatePath       <path>   Folder with pre-downloaded .msu/.cab files
+  -AppxListPath     <path>   XML with custom Appx removal list
+  -WimIndex         <int>    WIM index (0 = auto-detect Enterprise)
+  -FoDList          <keys>   PowerShell-ISE,SnippingTool,VBSCRIPT,WinOcr,
+                             DeveloperMode,Ethernet,Wifi,Notepad
+                             (any other value = DISM capability name)
+  -DriverPath       <path>   Root folder to recurse for driver .inf packages
+  -DriverListPath   <path>   XML with pre-selected driver INF paths
+  -SkipUpdates               Skip LCU / checkpoint / .NET CU
+  -SkipLanguagePacks         Skip language pack and Language.* FoD injection
+  -SkipAppxRemoval           Skip removal of provisioned Appx packages
+  -SkipDefenderUpdate        Skip the offline Defender update
+  -DebugBuild                Extra diagnostics
+  -Unattended                No interactive prompts
+  -Help                      Show this help (also: /?)
+
+[Y]  NOTES
+[Y]  -----
+  - FoDList accepts short keys (PowerShell-ISE etc.) or full DISM capability
+    names (e.g. "Microsoft.Windows.Foo~~~~0.0.1.0"). Short keys not in the
+    built-in catalog are expanded to "<key>~~~~".
+  - Locales already present in the source image (typically en-US) do NOT need
+    cabs in LanguagesAndOptionalFeatures — DISM resolves them against
+    already-installed components.
+  - The output WIM filename reflects the POST-servicing version (e.g.
+    26100.9974 after LCU), not the source version. User-supplied filenames
+    are never renamed.

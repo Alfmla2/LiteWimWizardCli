@@ -78,56 +78,9 @@
 .PARAMETER DebugBuild
     Extra DISM diagnostics.
 
-    Version : 7.0.1
-    Date    : 2026-11-24
+    Version : 7.0.2
+    Date    : 2026-11-26
     Requires: Windows PowerShell 5.1+, Administrator, DISM
-
-    CHANGELOG 7.0.1
-    Fix: documented and validated the required layout of
-    LanguagesAndOptionalFeatures. Removing locale-specific .cab files
-    for a target locale (or leaving <43 per locale) causes 0x80070002
-    on the main LP install, because DISM resolves satellite packages
-    per-locale (LP + LanguageFeatures + ~38 FoD satellites incl.)
-    Cabs for locales already in the image (en-US) are NOT needed —
-    DISM resolves those against installed components.
-    New Test-LPSourceComplete pre-flight in Step 2:
-     - missing metadata (FoDMetadata_Client.cab, FodMetadataServicing-*,
-       metadata\DesktopTargetCompDB_*) = fatal
-     - per-locale cab count < 43 = warning with likely-missing list
-     - per-locale required files (LP, LanguageFeatures-Basic,
-       DesktopTargetCompDBForISO[_FOD]_<locale>) = warning
-     - prints per-locale cab counts (green >= 43, yellow 30-42, red < 30)
-
-    CHANGELOG 7.0.0
-    - Removed -PatchExistingWim and all patch-mode code. To apply updates
-      only, place the existing WIM as install.wim and run with
-      -SkipLanguagePacks -SkipAppxRemoval -SkipDefenderUpdate.
-    - Removed Dismount-AllISOs no-op stub and every call site.
-    - Removed $Architecture variable (already unused after 6.1.0).
-    - Replaced corporate FoD catalog (NetFx3, RsatAD, RsatGPO, RsatSrvMgr)
-      with a home-user catalog: PowerShell-ISE, SnippingTool, VBSCRIPT,
-      WinOcr, DeveloperMode, Ethernet, Wifi, Notepad.
-      Also accepts arbitrary capability names via fallback.
-    - Removed Step 15a (NetFx3 special-case). "NetFX3" in -FoDList now
-      works through the generic FoD path ("NetFX3~~~~").
-    - Decoupled from WimWizard-GUI.ps1 (docs/help only). -AppxListPath
-      and -DriverListPath remain as plain XML inputs for any caller.
-    - Help examples reduced to -Languages "ru"; language map unchanged.
-    - Fixed Step 3 checkpoint pre-check: was on "elseif" and skipped
-      after manual update-path entry; now always runs when path known.
-    - Cleanup: removed unused PatchMode-related variables and dead code.
-
-    CHANGELOG 6.3.0
-    - Added Resolve-WimEsdFolder; removed ISO mounting entirely.
-      -SourceFolder renamed to -WimEsdPath; added
-      -LanguagesAndOptionalFeaturesPath.
-
-    CHANGELOG 6.2.x
-    - Restored checkpoint KB5043080; LCU pruning preserves it;
-      $lcuFile selector excludes it. Fixed -SkipUpdates guard.
-
-    CHANGELOG 6.1.0
-    - Removed SCCM/MECM, ARM64, SafeOS, WinRE, Inbox App Language Fix.
 
 .LINK
     https://admin.microsoft.com/adminportal/home#/subscriptions/vlnew/downloadsandkeys
@@ -138,9 +91,11 @@
 param(
     [switch]$Help,
     [string]$WimEsdPath = "",
+    [string]$WimFilePath = "",
     [string]$LanguagesAndOptionalFeaturesPath = "",
     [string]$UpdatePath,
     [string]$OutputPath,
+    [string]$WorkPath = "",
     [int]   $WimIndex = 0,
     [string]$Languages = "",
     [switch]$SkipUpdates,
@@ -157,71 +112,46 @@ param(
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
-$ScriptVersion = "7.0.0"
+$ScriptVersion = "7.0.3"
 $MinFreeSpaceGB = 30
 
 if ($WimEsdPath -eq '/?') { $Help = $true; $WimEsdPath = "" }
 
 if ($Help) {
-    Write-Host ""
-    Write-Host "  WIM Wizard v$ScriptVersion" -ForegroundColor Cyan
-    Write-Host ""
-    Write-Host "  USAGE" -ForegroundColor White
-    Write-Host "  -----"
-    Write-Host "  Interactive full build:"
-    Write-Host "    .\WimWizard.ps1"
-    Write-Host ""
-    Write-Host "  Unattended full build (Russian):"
-    Write-Host "    .\WimWizard.ps1 -Languages `"ru`" -Unattended"
-    Write-Host ""
-    Write-Host "  Unattended full build (Russian + FoDs):"
-    Write-Host "    .\WimWizard.ps1 -Languages `"ru`" -FoDList `"PowerShell-ISE,Wifi`" -Unattended"
-    Write-Host ""
-    Write-Host "  Full build with explicit paths:"
-    Write-Host "    .\WimWizard.ps1 -Languages `"ru`" ``"
-    Write-Host "      -WimEsdPath `"D:\WimEsd`" ``"
-    Write-Host "      -LanguagesAndOptionalFeaturesPath `"D:\LanguagesAndOptionalFeatures`" ``"
-    Write-Host "      -Unattended"
-    Write-Host ""
-    Write-Host "  Full build with driver injection:"
-    Write-Host "    .\WimWizard.ps1 -Languages `"ru`" -DriverPath `"D:\Drivers\Laptop`" -Unattended"
-    Write-Host ""
-    Write-Host "  Offline build with pre-downloaded updates:"
-    Write-Host "    .\WimWizard.ps1 -Languages `"ru`" -UpdatePath `"C:\Updates`" -Unattended"
-    Write-Host ""
-    Write-Host "  Update-only build (place existing WIM as install.wim in WimEsdPath):"
-    Write-Host "    .\WimWizard.ps1 -SkipLanguagePacks -SkipAppxRemoval -SkipDefenderUpdate -Unattended"
-    Write-Host ""
-    Write-Host "  PARAMETERS" -ForegroundColor White
-    Write-Host "  ----------"
-    Write-Host "  -WimEsdPath       <path>   Folder containing install.wim or install.esd"
-    Write-Host "                             (default: <ScriptRoot>\WimEsd\)"
-    Write-Host "  -LanguagesAndOptionalFeaturesPath <path>"
-    Write-Host "                             Folder with LP and FoD cab files"
-    Write-Host "                             (default: <ScriptRoot>\LanguagesAndOptionalFeatures\)"
-    Write-Host "  -Languages        <codes>  Comma-separated 2-letter codes (e.g. ru, de, fr)"
-    Write-Host "  -OutputPath       <path>   Output WIM path (folder or folder\file.wim)"
-    Write-Host "  -UpdatePath       <path>   Folder with pre-downloaded .msu/.cab files"
-    Write-Host "  -AppxListPath     <path>   XML with custom Appx removal list"
-    Write-Host "  -WimIndex         <int>    WIM index (0 = auto-detect Enterprise)"
-    Write-Host "  -FoDList          <keys>   PowerShell-ISE,SnippingTool,VBSCRIPT,WinOcr,"
-    Write-Host "                             DeveloperMode,Ethernet,Wifi,Notepad"
-    Write-Host "                             (any other value = DISM capability name)"
-    Write-Host "  -DriverPath       <path>   Root folder to recurse for driver .inf packages"
-    Write-Host "  -DriverListPath   <path>   XML with pre-selected driver INF paths"
-    Write-Host "  -SkipUpdates               Skip LCU / checkpoint / .NET CU"
-    Write-Host "  -SkipLanguagePacks         Skip language pack and Language.* FoD injection"
-    Write-Host "  -SkipAppxRemoval           Skip removal of provisioned Appx packages"
-    Write-Host "  -SkipDefenderUpdate        Skip the offline Defender update"
-    Write-Host "  -DebugBuild                Extra diagnostics"
-    Write-Host "  -Unattended                No interactive prompts"
-    Write-Host "  -Help                      Show this help (also: /?)"
-    Write-Host ""
+    # Help text lives in help.txt next to this script. Color prefixes:
+    #   [C]=Cyan [W]=White [Y]=Yellow [D]=DarkGray [R]=Red [G]=Green
+    #   no prefix = default foreground color
+    # {{VERSION}} is replaced with $ScriptVersion at runtime.
+    $helpRoot = $PSScriptRoot
+    if (-not $helpRoot) { $helpRoot = Split-Path -Parent $MyInvocation.MyCommand.Path }
+    $helpFile = if ($helpRoot) { Join-Path $helpRoot "help.txt" } else { "help.txt" }
+
+    if (Test-Path -LiteralPath $helpFile) {
+        $helpText = (Get-Content -LiteralPath $helpFile -Raw).Replace('{{VERSION}}', $ScriptVersion)
+        $colorMap = @{ C='Cyan'; W='White'; Y='Yellow'; D='DarkGray'; R='Red'; G='Green' }
+        foreach ($line in ($helpText -split "`r?`n")) {
+            if ($line -match '^\[([CWYDRG])\](.*)$') {
+                Write-Host $Matches[2] -ForegroundColor $colorMap[$Matches[1]]
+            } else {
+                Write-Host $line
+            }
+        }
+    } else {
+        Write-Host "  WIM Wizard v$ScriptVersion" -ForegroundColor Cyan
+        Write-Host "    .\WimWizard.ps1                                    # interactive"
+        Write-Host "    .\WimWizard.ps1 -Languages `"ru`" -Unattended       # unattended RU build"
+        Write-Host ""
+    }
     exit 0
 }
 
 $ScriptRoot = $PSScriptRoot
 if (-not $ScriptRoot) { $ScriptRoot = Split-Path -Parent $MyInvocation.MyCommand.Path }
+# Remember whether caller explicitly passed paths — controls whether we prompt
+$outputPathWasExplicit =  [bool]$OutputPath
+$langPathWasExplicit   =  [bool]$LanguagesAndOptionalFeaturesPath
+$wimFilePathWasExplicit = [bool]$WimFilePath
+$workPathWasExplicit   =  [bool]$WorkPath
 
 if (-not $WimEsdPath) { $WimEsdPath = "$ScriptRoot\WimEsd" }
 if (-not $LanguagesAndOptionalFeaturesPath) { $LanguagesAndOptionalFeaturesPath = "$ScriptRoot\LanguagesAndOptionalFeatures" }
@@ -546,7 +476,8 @@ $AppxToRemove = $AppxToRemoveDefault
 function Resolve-WimEsdFolder {
     param(
         [Parameter(Mandatory)][string]$Folder,
-        [string]$LanguagesAndOptionalFeaturesPath = ""
+        [string]$LanguagesAndOptionalFeaturesPath = "",
+        [string]$WimFilePath = ""
     )
 
     if (-not (Test-Path -LiteralPath $Folder)) {
@@ -554,35 +485,64 @@ function Resolve-WimEsdFolder {
         return $null
     }
 
-    Write-Info "Scanning $Folder for install.wim or install.esd..."
-
-    $wimFile = Get-ChildItem -LiteralPath $Folder -Filter "install.wim" -ErrorAction SilentlyContinue |
-    Select-Object -First 1
-    if (-not $wimFile) {
-        $wimFile = Get-ChildItem -LiteralPath $Folder -Filter "install.esd" -ErrorAction SilentlyContinue |
-        Select-Object -First 1
-    }
-    if (-not $wimFile) {
-        Write-Info "Searching recursively..."
-        $wimFile = Get-ChildItem -LiteralPath $Folder -Filter "install.wim" -Recurse -ErrorAction SilentlyContinue |
-        Select-Object -First 1
-        if (-not $wimFile) {
-            $wimFile = Get-ChildItem -LiteralPath $Folder -Filter "install.esd" -Recurse -ErrorAction SilentlyContinue |
-            Select-Object -First 1
+    # ── 1. Explicit -WimFilePath wins (bypasses search) ─────────────────────
+    $wimFile = $null
+    if ($WimFilePath) {
+        if (Test-Path -LiteralPath $WimFilePath -PathType Leaf) {
+            $wimFile = Get-Item -LiteralPath $WimFilePath
+            Write-OK "Using explicit WIM/ESD: $($wimFile.FullName)"
+        } else {
+            Write-Warn "-WimFilePath not found: $WimFilePath — falling back to folder search"
         }
     }
+
+    # ── 2. Search: install.wim/install.esd first, then any *.wim/*.esd ─────
     if (-not $wimFile) {
-        Write-Warn "No install.wim or install.esd found in: $Folder"
+        Write-Info "Scanning $Folder for install.wim or install.esd..."
+
+        foreach ($n in @("install.wim","install.esd")) {
+            $wimFile = Get-ChildItem -LiteralPath $Folder -Filter $n -ErrorAction SilentlyContinue |
+                       Select-Object -First 1
+            if ($wimFile) { break }
+        }
+        if (-not $wimFile) {
+            Write-Info "No install.wim/esd at top level; searching recursively..."
+            foreach ($n in @("install.wim","install.esd")) {
+                $wimFile = Get-ChildItem -LiteralPath $Folder -Filter $n -Recurse -ErrorAction SilentlyContinue |
+                           Select-Object -First 1
+                if ($wimFile) { break }
+            }
+        }
+        # Fallback: any .wim/.esd (renamed files, saved patch-mode outputs, etc.)
+        if (-not $wimFile) {
+            $candidates = @(
+                Get-ChildItem -LiteralPath $Folder -Filter "*.wim" -Recurse -ErrorAction SilentlyContinue
+                Get-ChildItem -LiteralPath $Folder -Filter "*.esd" -Recurse -ErrorAction SilentlyContinue
+            )
+            if ($candidates.Count -gt 1) {
+                Write-Warn "No install.wim/esd, but $($candidates.Count) candidate WIM/ESD files found:"
+                $candidates | ForEach-Object { Write-Host "    $($_.FullName)" -ForegroundColor DarkGray }
+                Write-Warn "Using the first one; pass -WimFilePath to disambiguate."
+            }
+            $wimFile = $candidates | Select-Object -First 1
+            if ($wimFile) {
+                Write-Info "Using fallback WIM/ESD (not named install.wim): $($wimFile.Name)"
+            }
+        }
+    }
+
+    if (-not $wimFile) {
+        Write-Warn "No .wim or .esd file found in: $Folder"
         return $null
     }
     Write-OK "Found WIM/ESD: $($wimFile.FullName)"
 
+    # ── LP/FoD source (independent from WIM folder) ─────────────────────────
     $lpRoot = $null
     if ($LanguagesAndOptionalFeaturesPath -and (Test-Path -LiteralPath $LanguagesAndOptionalFeaturesPath)) {
         $lpRoot = $LanguagesAndOptionalFeaturesPath
         Write-OK "LP/FoD source (explicit): $lpRoot"
-    }
-    else {
+    } else {
         if ($LanguagesAndOptionalFeaturesPath) {
             Write-Warn "LanguagesAndOptionalFeaturesPath not found: $LanguagesAndOptionalFeaturesPath"
         }
@@ -590,8 +550,7 @@ function Resolve-WimEsdFolder {
         if (Test-Path -LiteralPath $autoSub) {
             $lpRoot = $autoSub
             Write-OK "LP/FoD source (auto-detected): $lpRoot"
-        }
-        else {
+        } else {
             Write-Warn "No LanguagesAndOptionalFeatures folder found."
             Write-Warn "LP/FoD injection may fail. Set -LanguagesAndOptionalFeaturesPath explicitly."
             $lpRoot = $Folder
@@ -988,11 +947,6 @@ $dismOut = & dism.exe /English /? 2>&1
 if ($LASTEXITCODE -gt 1) { Write-Fail "DISM not found."; exit 1 }
 Write-OK "DISM available"
 
-$drive = Get-PSDrive ($env:SystemDrive.TrimEnd(':'))
-$freeGB = [math]::Round($drive.Free / 1GB, 1)
-if ($freeGB -lt 30) { Write-Warn "Only $freeGB GB free. At least 30 GB recommended." }
-else { Write-OK "$freeGB GB free disk space" }
-
 $internetOK = $false
 try {
     [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
@@ -1022,10 +976,29 @@ if (-not (Test-Path $WimEsdPath)) {
         -MustExist
     if (-not $WimEsdPath) { exit 1 }
 }
+# Prompt for LP/FoD path if needed and not explicitly provided
+$needLP = (-not $SkipLanguagePacks) -or ($FoDList -ne "")
+if ($needLP -and -not (Test-Path $LanguagesAndOptionalFeaturesPath) -and -not $Unattended) {
+    Write-Host ""
+    Write-Warn "LanguagesAndOptionalFeatures folder not found at:"
+    Write-Host "    $LanguagesAndOptionalFeaturesPath" -ForegroundColor DarkGray
+    $LanguagesAndOptionalFeaturesPath = Read-PathWithDefault `
+        -Prompt  "Path to LanguagesAndOptionalFeatures folder (LP/FoD cabs):" `
+        -Default "$ScriptRoot\LanguagesAndOptionalFeatures" `
+        -MustExist
+    if (-not $LanguagesAndOptionalFeaturesPath) {
+        Write-Fail "LanguagesAndOptionalFeatures path required for LP/FoD injection."
+        Write-Fail "Provide -LanguagesAndOptionalFeaturesPath, or run with -SkipLanguagePacks -FoDList ''"
+        exit 1
+    }
+}
 
-Write-Info "Scanning $WimEsdPath for install.wim or install.esd..."
+# Prompt for WIM file if the folder doesn't contain install.wim/esd
+# (let Resolve-WimEsdFolder do its search first — see below)
+Write-Info "Scanning $WimEsdPath for WIM/ESD..."
 $wimEsdDiscovered = Resolve-WimEsdFolder -Folder $WimEsdPath `
-    -LanguagesAndOptionalFeaturesPath $LanguagesAndOptionalFeaturesPath
+    -LanguagesAndOptionalFeaturesPath $LanguagesAndOptionalFeaturesPath `
+    -WimFilePath $WimFilePath
 
 $wimFile = $null
 $LPSearchRoot = $null
@@ -1330,33 +1303,45 @@ $_dateStr = Get-Date -Format "yyyyMMdd"
 
 $_langStr = if ($SkipLanguagePacks -or @($ResolvedLocales).Count -eq 0) {
     "en"
-}
-else {
+} else {
     $rawCodes = $Languages.ToLower().Split(',') | ForEach-Object { $_.Trim() } | Where-Object { $_ -ne "" }
     if ($rawCodes) { $rawCodes -join "_" } else { "en" }
 }
 $_autoName = "Win11_${_versionStr}_${_buildStr}_${_langStr}_${_dateStr}.wim"
 
-if ($OutputPath -and (Test-Path $OutputPath -PathType Container)) {
-    $OutputPath = Join-Path $OutputPath $_autoName
-}
-elseif ($OutputPath -and -not [System.IO.Path]::GetExtension($OutputPath)) {
-    $OutputPath = Join-Path $OutputPath $_autoName
+# ── Resolve OutputPath ──────────────────────────────────────────────────────
+function Resolve-OutputFolder {
+    param([string]$Path, [string]$AutoName)
+    if (-not $Path) { return $Path }
+    if (Test-Path $Path -PathType Container) {
+        return (Join-Path $Path $AutoName)
+    }
+    if (-not [System.IO.Path]::GetExtension($Path)) {
+        return (Join-Path $Path $AutoName)
+    }
+    return $Path
 }
 
-$_autoPath = Join-Path (Split-Path $OutputPath -Parent) $_autoName
-if (-not $OutputPath -or $OutputPath -eq "$ScriptRoot\Output\install.wim") { $OutputPath = $_autoPath }
-
-$OutputPath = Read-PathWithDefault `
-    -Prompt  "Output WIM path (folder only = auto-name, or full path with .wim):" `
-    -Default $OutputPath
-
-if ($OutputPath -and (Test-Path $OutputPath -PathType Container)) {
-    $OutputPath = Join-Path $OutputPath $_autoName
+if ($outputPathWasExplicit) {
+    # User passed -OutputPath; don't prompt. Folder → append auto-name.
+    $OutputPath = Resolve-OutputFolder -Path $OutputPath -AutoName $_autoName
+    Write-OK "Using -OutputPath: $OutputPath"
+} else {
+    # No explicit path; use default with auto-name
+    $defaultOutputDir = Join-Path $ScriptRoot "Output"
+    $defaultOut = Join-Path $defaultOutputDir $_autoName
+    if ($Unattended) {
+        $OutputPath = $defaultOut
+    } else {
+        $OutputPath = Read-PathWithDefault `
+            -Prompt  "Output WIM path (folder only = auto-name, or full path with .wim):" `
+            -Default $defaultOut
+        $OutputPath = Resolve-OutputFolder -Path $OutputPath -AutoName $_autoName
+    }
 }
-elseif ($OutputPath -and -not [System.IO.Path]::GetExtension($OutputPath)) {
-    $OutputPath = Join-Path $OutputPath $_autoName
-}
+
+# Track whether name is auto-generated (used to rename after export if version changed)
+$script:OutputAutoNamed = ([System.IO.Path]::GetFileName($OutputPath) -eq $_autoName)
 
 $outputDir = Split-Path $OutputPath -Parent
 if (-not $outputDir) { $outputDir = Split-Path $OutputPath -Qualifier }
@@ -1369,21 +1354,28 @@ Write-OK "Output WIM: $OutputPath"
 
 Test-OutputDiskSpace -Path $OutputPath -Label "output location"
 
-# Work folder for WIM mount + scratch (~20 GB)
+# ── Resolve Work folder ─────────────────────────────────────────────────────
 $workRootDefault = Join-Path $outputDir "WIMServicing_Work"
 Write-Host ""
 Write-Host "  Work folder (WIM mount + scratch, ~20 GB needed during build)." -ForegroundColor White
 Write-Host "  Delete-able after build completes." -ForegroundColor DarkGray
-$workRoot = Read-PathWithDefault `
-    -Prompt  "Work folder for WIM mount + scratch files:" `
-    -Default $workRootDefault
+
+if ($workPathWasExplicit) {
+    $workRoot = $WorkPath
+    Write-OK "Using -WorkPath: $workRoot"
+} elseif ($Unattended) {
+    $workRoot = $workRootDefault
+} else {
+    $workRoot = Read-PathWithDefault `
+        -Prompt  "Work folder for WIM mount + scratch files:" `
+        -Default $workRootDefault
+}
 if (-not $workRoot) { $workRoot = $workRootDefault }
 if (-not (Test-Path $workRoot)) {
     try {
         New-Item $workRoot -ItemType Directory -Force | Out-Null
         Write-OK "Created work folder: $workRoot"
-    }
-    catch {
+    } catch {
         Write-Fail "Cannot create work folder: $($_.Exception.Message)"
         exit 1
     }
@@ -1487,22 +1479,24 @@ if (-not $SkipAppxRemoval) {
 
 # Cut-pasteable command line for the log
 $_cmdParts = @(".\WimWizard.ps1")
-if ($WimEsdPath) { $_cmdParts += "-WimEsdPath `"$WimEsdPath`"" }
-if ($LanguagesAndOptionalFeaturesPath) { $_cmdParts += "-LanguagesAndOptionalFeaturesPath `"$LanguagesAndOptionalFeaturesPath`"" }
-if ($OutputPath) { $_cmdParts += "-OutputPath `"$OutputPath`"" }
-if ($WimIndex -ne 0) { $_cmdParts += "-WimIndex $WimIndex" }
-if ($Languages) { $_cmdParts += "-Languages `"$Languages`"" }
-if ($UpdatePath) { $_cmdParts += "-UpdatePath `"$UpdatePath`"" }
-if ($FoDList) { $_cmdParts += "-FoDList `"$FoDList`"" }
-if ($DriverPath) { $_cmdParts += "-DriverPath `"$DriverPath`"" }
-if ($DriverListPath) { $_cmdParts += "-DriverListPath `"$DriverListPath`"" }
-if ($AppxListPath) { $_cmdParts += "-AppxListPath `"$AppxListPath`"" }
-if ($SkipUpdates) { $_cmdParts += "-SkipUpdates" }
-if ($SkipLanguagePacks) { $_cmdParts += "-SkipLanguagePacks" }
-if ($SkipAppxRemoval) { $_cmdParts += "-SkipAppxRemoval" }
-if ($SkipDefenderUpdate) { $_cmdParts += "-SkipDefenderUpdate" }
-if ($Unattended) { $_cmdParts += "-Unattended" }
-if ($DebugBuild) { $_cmdParts += "-DebugBuild" }
+if ($WimEsdPath)                        { $_cmdParts += "-WimEsdPath `"$WimEsdPath`"" }
+if ($WimFilePath)                       { $_cmdParts += "-WimFilePath `"$WimFilePath`"" }
+if ($LanguagesAndOptionalFeaturesPath)  { $_cmdParts += "-LanguagesAndOptionalFeaturesPath `"$LanguagesAndOptionalFeaturesPath`"" }
+if ($OutputPath)                        { $_cmdParts += "-OutputPath `"$OutputPath`"" }
+if ($WorkPath)                          { $_cmdParts += "-WorkPath `"$WorkPath`"" }
+if ($WimIndex -ne 0)                    { $_cmdParts += "-WimIndex $WimIndex" }
+if ($Languages)                         { $_cmdParts += "-Languages `"$Languages`"" }
+if ($UpdatePath)                        { $_cmdParts += "-UpdatePath `"$UpdatePath`"" }
+if ($FoDList)                           { $_cmdParts += "-FoDList `"$FoDList`"" }
+if ($DriverPath)                        { $_cmdParts += "-DriverPath `"$DriverPath`"" }
+if ($DriverListPath)                    { $_cmdParts += "-DriverListPath `"$DriverListPath`"" }
+if ($AppxListPath)                      { $_cmdParts += "-AppxListPath `"$AppxListPath`"" }
+if ($SkipUpdates)                       { $_cmdParts += "-SkipUpdates" }
+if ($SkipLanguagePacks)                 { $_cmdParts += "-SkipLanguagePacks" }
+if ($SkipAppxRemoval)                   { $_cmdParts += "-SkipAppxRemoval" }
+if ($SkipDefenderUpdate)                { $_cmdParts += "-SkipDefenderUpdate" }
+if ($Unattended)                        { $_cmdParts += "-Unattended" }
+if ($DebugBuild)                        { $_cmdParts += "-DebugBuild" }
 Write-Log ($_cmdParts -join " ")
 Write-Log "WIM/ESD source: $WimEsdPath  WIM: $wimFile  Index: $WimIndex  Edition: $($chosenImage.ImageName)"
 Write-Log "Work folder: $workRoot"
@@ -2195,6 +2189,36 @@ try {
     Write-Info "Exporting to: $OutputPath (this takes ~10-15 min)..."
     Export-WindowsImage -SourceImagePath $workWim -SourceIndex 1 `
         -DestinationImagePath $OutputPath -CompressionType Max -CheckIntegrity
+
+    # Re-read actual post-servicing version (LCU changes it, e.g. 26100.1742 -> .9974).
+    # Only rename if the filename was auto-generated (folder-only OutputPath or default).
+    if ($script:OutputAutoNamed) {
+        try {
+            $finalInfo = Get-WindowsImage -ImagePath $OutputPath -Index 1 -ErrorAction Stop
+            if ($finalInfo.Version -match '^\d+\.\d+\.(\d+\.\d+)$') {
+                $finalBuild = $Matches[1]
+                if ($finalBuild -ne $_buildStr) {
+                    $curName = [System.IO.Path]::GetFileName($OutputPath)
+                    $curDir  = Split-Path $OutputPath -Parent
+                    if ($curName -match '_\d+\.\d+_\d{8}\.wim$') {
+                        $newName = $curName -replace '_\d+\.\d+_', "_${finalBuild}_"
+                        $newPath = Join-Path $curDir $newName
+                        if (-not (Test-Path -LiteralPath $newPath)) {
+                            Move-Item -LiteralPath $OutputPath -Destination $newPath -Force
+                            $OutputPath = $newPath
+                            Write-Info "Renamed with post-servicing version: $_buildStr -> $finalBuild"
+                            Write-Log "Output renamed: $($curName) -> $($newName)"
+                        } else {
+                            Write-Warn "Cannot rename: $newName already exists - keeping $curName"
+                        }
+                    }
+                }
+            }
+        } catch {
+            Write-Warn "Could not verify final version: $($_.Exception.Message)"
+        }
+    }
+
     $sizeGB = [math]::Round((Get-Item -LiteralPath $OutputPath).Length / 1GB, 2)
     Write-OK "Exported: $OutputPath ($sizeGB GB)"
     Write-Log "Exported: $OutputPath ($sizeGB GB)"
@@ -2219,7 +2243,8 @@ Remove-Item $workRoot -Recurse -Force -ErrorAction SilentlyContinue
 
 Write-Section "DONE"
 Write-Host ""
-Write-Host "  Output       : $OutputPath" -ForegroundColor Cyan
+Write-Host "  Output WIM   : $OutputPath" -ForegroundColor Cyan
+Write-Host "  Work folder  : $workRoot" -ForegroundColor Cyan
 Write-Host "  Size         : $sizeGB GB" -ForegroundColor Cyan
 Write-Host "  Edition      : $($chosenImage.ImageName)" -ForegroundColor Cyan
 Write-Host "  Languages    : $(if ($ResolvedLocales.Count) { $ResolvedLocales -join ', ' } else { 'en (none injected)' })" -ForegroundColor Cyan
