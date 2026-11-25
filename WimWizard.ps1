@@ -78,9 +78,25 @@
 .PARAMETER DebugBuild
     Extra DISM diagnostics.
 
-    Version : 7.0.0
+    Version : 7.0.1
     Date    : 2026-11-24
     Requires: Windows PowerShell 5.1+, Administrator, DISM
+
+    CHANGELOG 7.0.1
+    Fix: documented and validated the required layout of
+    LanguagesAndOptionalFeatures. Removing locale-specific .cab files
+    for a target locale (or leaving <43 per locale) causes 0x80070002
+    on the main LP install, because DISM resolves satellite packages
+    per-locale (LP + LanguageFeatures + ~38 FoD satellites incl.)
+    Cabs for locales already in the image (en-US) are NOT needed —
+    DISM resolves those against installed components.
+    New Test-LPSourceComplete pre-flight in Step 2:
+     - missing metadata (FoDMetadata_Client.cab, FodMetadataServicing-*,
+       metadata\DesktopTargetCompDB_*) = fatal
+     - per-locale cab count < 43 = warning with likely-missing list
+     - per-locale required files (LP, LanguageFeatures-Basic,
+       DesktopTargetCompDBForISO[_FOD]_<locale>) = warning
+     - prints per-locale cab counts (green >= 43, yellow 30-42, red < 30)
 
     CHANGELOG 7.0.0
     - Removed -PatchExistingWim and all patch-mode code. To apply updates
@@ -141,7 +157,7 @@ param(
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
-$ScriptVersion  = "7.0.0"
+$ScriptVersion = "7.0.0"
 $MinFreeSpaceGB = 30
 
 if ($WimEsdPath -eq '/?') { $Help = $true; $WimEsdPath = "" }
@@ -213,25 +229,25 @@ if (-not $OutputPath) { $OutputPath = "$ScriptRoot\Output\install.wim" }
 
 # ── Locale map (2-letter code → locale tags) ─────────────────────────────────
 $LocaleMap = @{
-    'ar'=@('ar-SA');'bg'=@('bg-BG');'cs'=@('cs-CZ');'da'=@('da-DK');'de'=@('de-DE');
-    'dk'=@('da-DK');'el'=@('el-GR');'en'=@('en-GB','en-US');'es'=@('es-ES','es-MX');
-    'et'=@('et-EE');'fi'=@('fi-FI');'fr'=@('fr-CA','fr-FR');'gb'=@('en-GB');'gr'=@('el-GR');
-    'he'=@('he-IL');'hr'=@('hr-HR');'hu'=@('hu-HU');'il'=@('he-IL');'it'=@('it-IT');
-    'ja'=@('ja-JP');'jp'=@('ja-JP');'ko'=@('ko-KR');'kr'=@('ko-KR');'lt'=@('lt-LT');
-    'lv'=@('lv-LV');'mx'=@('es-MX');'nl'=@('nl-NL');'no'=@('nb-NO');'pl'=@('pl-PL');
-    'pt'=@('pt-BR','pt-PT');'ro'=@('ro-RO');'ru'=@('ru-RU');'se'=@('sv-SE');'sk'=@('sk-SK');
-    'sl'=@('sl-SI');'sr'=@('sr-Latn-RS');'sv'=@('sv-SE');'th'=@('th-TH');'tr'=@('tr-TR');
-    'tw'=@('zh-TW');'hk'=@('zh-TW');'ua'=@('uk-UA');'uk'=@('uk-UA');'us'=@('en-US');
-    'vn'=@('vi-VN');'zh'=@('zh-CN','zh-TW');'cn'=@('zh-CN');
-    'ca'=@('ca-ES');'eu'=@('eu-ES');'gl'=@('gl-ES');'id'=@('id-ID');'vi'=@('vi-VN')
+    'ar' = @('ar-SA'); 'bg' = @('bg-BG'); 'cs' = @('cs-CZ'); 'da' = @('da-DK'); 'de' = @('de-DE');
+    'dk' = @('da-DK'); 'el' = @('el-GR'); 'en' = @('en-GB', 'en-US'); 'es' = @('es-ES', 'es-MX');
+    'et' = @('et-EE'); 'fi' = @('fi-FI'); 'fr' = @('fr-CA', 'fr-FR'); 'gb' = @('en-GB'); 'gr' = @('el-GR');
+    'he' = @('he-IL'); 'hr' = @('hr-HR'); 'hu' = @('hu-HU'); 'il' = @('he-IL'); 'it' = @('it-IT');
+    'ja' = @('ja-JP'); 'jp' = @('ja-JP'); 'ko' = @('ko-KR'); 'kr' = @('ko-KR'); 'lt' = @('lt-LT');
+    'lv' = @('lv-LV'); 'mx' = @('es-MX'); 'nl' = @('nl-NL'); 'no' = @('nb-NO'); 'pl' = @('pl-PL');
+    'pt' = @('pt-BR', 'pt-PT'); 'ro' = @('ro-RO'); 'ru' = @('ru-RU'); 'se' = @('sv-SE'); 'sk' = @('sk-SK');
+    'sl' = @('sl-SI'); 'sr' = @('sr-Latn-RS'); 'sv' = @('sv-SE'); 'th' = @('th-TH'); 'tr' = @('tr-TR');
+    'tw' = @('zh-TW'); 'hk' = @('zh-TW'); 'ua' = @('uk-UA'); 'uk' = @('uk-UA'); 'us' = @('en-US');
+    'vn' = @('vi-VN'); 'zh' = @('zh-CN', 'zh-TW'); 'cn' = @('zh-CN');
+    'ca' = @('ca-ES'); 'eu' = @('eu-ES'); 'gl' = @('gl-ES'); 'id' = @('id-ID'); 'vi' = @('vi-VN')
 }
 $SupportedCodesLine = ($LocaleMap.Keys | Sort-Object) -join ", "
 
 # ── Output helpers ───────────────────────────────────────────────────────────
-function Write-OK       { param([string]$msg) Write-Host "  [OK]  $msg" -ForegroundColor Green }
-function Write-Warn     { param([string]$msg) Write-Host "  [!]   $msg" -ForegroundColor Yellow }
-function Write-Info     { param([string]$msg) Write-Host "  [i]   $msg" -ForegroundColor Cyan }
-function Write-Fail     { param([string]$msg) Write-Host "  [ERR] $msg" -ForegroundColor Red }
+function Write-OK { param([string]$msg) Write-Host "  [OK]  $msg" -ForegroundColor Green }
+function Write-Warn { param([string]$msg) Write-Host "  [!]   $msg" -ForegroundColor Yellow }
+function Write-Info { param([string]$msg) Write-Host "  [i]   $msg" -ForegroundColor Cyan }
+function Write-Fail { param([string]$msg) Write-Host "  [ERR] $msg" -ForegroundColor Red }
 function Write-DiskWarn { param([string]$msg) Write-Host "  [!]   $msg" -ForegroundColor DarkYellow }
 
 # ── Disk space helpers ───────────────────────────────────────────────────────
@@ -246,7 +262,7 @@ function Get-FreeSpaceGB {
         }
         if ([string]::IsNullOrWhiteSpace($dir)) { return $null }
         if ($dir -match '^[A-Za-z]:\\?$|^[A-Za-z]:\\') {
-            $psDrive = Get-PSDrive -Name $dir.Substring(0,1) -ErrorAction SilentlyContinue
+            $psDrive = Get-PSDrive -Name $dir.Substring(0, 1) -ErrorAction SilentlyContinue
             if ($psDrive) { return [math]::Round($psDrive.Free / 1GB, 1) }
             return $null
         }
@@ -259,7 +275,8 @@ function Get-FreeSpaceGB {
         if (-not $probe -or -not (Test-Path -LiteralPath $probe)) { return $null }
         $drive = New-Object System.IO.DriveInfo($probe)
         return [math]::Round($drive.AvailableFreeSpace / 1GB, 1)
-    } catch { return $null }
+    }
+    catch { return $null }
 }
 
 function Test-OutputDiskSpace {
@@ -310,28 +327,28 @@ function Resolve-InfToken {
 }
 function Get-InfDriverInfo {
     param([Parameter(Mandatory)][string]$InfPath)
-    $content      = Get-Content -LiteralPath $InfPath -Raw -ErrorAction Stop
+    $content = Get-Content -LiteralPath $InfPath -Raw -ErrorAction Stop
     $stringsTable = Get-InfStringsTable -Content $content
     $versionBlock = if ($content -match '(?ms)^\[Version\](.*?)(?:^\[|\z)') { $Matches[1] } else { $content }
-    $provider  = if ($versionBlock -match '(?im)^\s*Provider\s*=\s*(.+?)\s*$')  { Remove-InfComment ($Matches[1].Trim('"',' ')) } else { "" }
-    $class     = if ($versionBlock -match '(?im)^\s*Class\s*=\s*(.+?)\s*$')     { Remove-InfComment ($Matches[1].Trim('"',' ')) } else { "" }
+    $provider = if ($versionBlock -match '(?im)^\s*Provider\s*=\s*(.+?)\s*$') { Remove-InfComment ($Matches[1].Trim('"', ' ')) } else { "" }
+    $class = if ($versionBlock -match '(?im)^\s*Class\s*=\s*(.+?)\s*$') { Remove-InfComment ($Matches[1].Trim('"', ' ')) } else { "" }
     $driverVer = if ($versionBlock -match '(?im)^\s*DriverVer\s*=\s*(.+?)\s*$') { Remove-InfComment ($Matches[1].Trim()) } else { "" }
-    $provider  = Resolve-InfToken -Value $provider -Strings $stringsTable
-    $class     = Resolve-InfToken -Value $class    -Strings $stringsTable
+    $provider = Resolve-InfToken -Value $provider -Strings $stringsTable
+    $class = Resolve-InfToken -Value $class    -Strings $stringsTable
     $date = ""; $version = ""
     if ($driverVer -match '^([\d/]+)\s*,\s*(.+)$') { $date = $Matches[1]; $version = $Matches[2] }
     elseif ($driverVer) { $version = $driverVer }
     $classLabels = @{
-        'Net'='Network';'HDC'='Storage controller';'System'='System device';
-        'Display'='Display / GPU';'Media'='Audio / media';'Monitor'='Monitor';
-        'Battery'='Battery / ACPI';'USB'='USB controller';'Bluetooth'='Bluetooth';
-        'SmartCardReader'='Smart card reader'
+        'Net' = 'Network'; 'HDC' = 'Storage controller'; 'System' = 'System device';
+        'Display' = 'Display / GPU'; 'Media' = 'Audio / media'; 'Monitor' = 'Monitor';
+        'Battery' = 'Battery / ACPI'; 'USB' = 'USB controller'; 'Bluetooth' = 'Bluetooth';
+        'SmartCardReader' = 'Smart card reader'
     }
     $classLabel = if ($class -and $classLabels.ContainsKey($class)) { $classLabels[$class] } else { $class }
     [PSCustomObject]@{
-        InfPath=$InfPath; FileName=Split-Path $InfPath -Leaf;
-        Manufacturer=$provider; Class=$classLabel; ClassRaw=$class;
-        Version=$version; Date=$date
+        InfPath = $InfPath; FileName = Split-Path $InfPath -Leaf;
+        Manufacturer = $provider; Class = $classLabel; ClassRaw = $class;
+        Version = $version; Date = $date
     }
 }
 function Get-DriverInfoFromFolder {
@@ -340,14 +357,15 @@ function Get-DriverInfoFromFolder {
     Get-ChildItem -LiteralPath $Root -Recurse -Filter *.inf -ErrorAction Stop | ForEach-Object {
         try { Get-InfDriverInfo -InfPath $_.FullName }
         catch {
-            [PSCustomObject]@{ InfPath=$_.FullName; FileName=$_.Name; Manufacturer="?";
-                Class="(parse error)"; ClassRaw=""; Version=""; Date="" }
+            [PSCustomObject]@{ InfPath = $_.FullName; FileName = $_.Name; Manufacturer = "?";
+                Class = "(parse error)"; ClassRaw = ""; Version = ""; Date = ""
+            }
         }
     }
 }
 function Install-WimWizardDrivers {
     param([Parameter(Mandatory)][string]$MountDir, [Parameter(Mandatory)][string]$ScratchDir,
-          [string]$DriverPath, [string]$DriverListPath)
+        [string]$DriverPath, [string]$DriverListPath)
     $driverInfPaths = @()
     $driverListLoaded = $false
     if (($DriverListPath -is [string]) -and $DriverListPath.Length -gt 0 -and (Test-Path -LiteralPath $DriverListPath)) {
@@ -359,7 +377,8 @@ function Install-WimWizardDrivers {
             $driverListLoaded = $true
             Write-Info "Loaded driver selection from: $DriverListPath ($($driverInfPaths.Count) drivers)"
             Write-Log "Loaded driver list: $DriverListPath ($($driverInfPaths.Count) drivers)"
-        } catch {
+        }
+        catch {
             Write-Warn "Could not load DriverListPath: $($_.Exception.Message) - falling back to DriverPath"
             Write-Log "WARN: Could not load DriverListPath: $($_.Exception.Message)" "WARN"
         }
@@ -369,7 +388,8 @@ function Install-WimWizardDrivers {
             $driverInfPaths = @(Get-DriverInfoFromFolder -Root $DriverPath | ForEach-Object { $_.InfPath })
             Write-Info "Scanned $DriverPath - $($driverInfPaths.Count) driver INFs found"
             Write-Log "Scanned DriverPath: $DriverPath ($($driverInfPaths.Count) INFs found)"
-        } catch {
+        }
+        catch {
             Write-Warn "Could not scan DriverPath: $($_.Exception.Message)"
             Write-Log "WARN: Could not scan DriverPath: $($_.Exception.Message)" "WARN"
             return
@@ -383,7 +403,8 @@ function Install-WimWizardDrivers {
         try {
             Add-WindowsDriver -Path $MountDir -Driver $inf -ScratchDirectory $ScratchDir -ErrorAction Stop | Out-Null
             Write-OK "Driver: $label"; Write-Log "Driver OK: $inf"; $driverOK++
-        } catch {
+        }
+        catch {
             Write-Warn "Driver failed: $label - $($_.Exception.Message)"
             Write-Log "WARN Driver failed $inf`: $($_.Exception.Message)" "WARN"; $driverFailed++
         }
@@ -395,13 +416,14 @@ function Install-WimWizardDrivers {
 # ── Language code resolution ─────────────────────────────────────────────────
 function Resolve-LanguageCodes {
     param([string]$CodeString)
-    $codes  = $CodeString.ToLower().Split(',') | ForEach-Object { $_.Trim() } | Where-Object { $_ -ne "" }
+    $codes = $CodeString.ToLower().Split(',') | ForEach-Object { $_.Trim() } | Where-Object { $_ -ne "" }
     $result = [System.Collections.Generic.List[string]]::new()
     $errors = @()
     foreach ($code in $codes) {
         if ($LocaleMap.ContainsKey($code)) {
             foreach ($tag in $LocaleMap[$code]) { if (-not $result.Contains($tag)) { $result.Add($tag) } }
-        } else { $errors += $code }
+        }
+        else { $errors += $code }
     }
     if ($errors.Count -gt 0) {
         Write-Fail "Unknown language code(s): $($errors -join ', ')"
@@ -428,7 +450,7 @@ function Get-CatalogSearchTerms {
     $build = 0
     if ($WimVersion -match '^\d+\.\d+\.(\d+)\.') { $build = [int]$Matches[1] }
     $versionString = switch ($true) {
-        ($build -ge 26300)                       { "26H2" }
+        ($build -ge 26300) { "26H2" }
         ($build -ge 26200 -and $build -lt 26300) { "25H2" }
         ($build -ge 26100 -and $build -lt 26200) { "24H2" }
         ($build -ge 22631 -and $build -lt 26100) { "23H2" }
@@ -453,16 +475,17 @@ function Write-Banner {
     $w = "=" * 66
     Write-Host "+$w+" -ForegroundColor Cyan
     Write-Host ("|  WIM WIZARD  v{0,-55}|" -f $ScriptVersion) -ForegroundColor Cyan
-    Write-Host "|  A tribute to WIM Witch by Donna Ryan                             |" -ForegroundColor Cyan
     Write-Host "+$w+" -ForegroundColor Cyan
     Write-Host ""
 }
-function Write-Section { param([string]$Title)
+function Write-Section {
+    param([string]$Title)
     Write-Host ""; Write-Host ("-" * 66) -ForegroundColor DarkCyan
     Write-Host "  >> $Title" -ForegroundColor White
     Write-Host ("-" * 66) -ForegroundColor DarkCyan
 }
-function Confirm-Continue { param([string]$Message = "Continue?")
+function Confirm-Continue {
+    param([string]$Message = "Continue?")
     if ($Unattended) { return $true }
     Write-Host ""; $answer = Read-Host "  $Message [Y/n]"
     return ($answer -eq "" -or $answer -match "^[yY]")
@@ -473,11 +496,12 @@ function Read-PathWithDefault {
         Write-Info "$Prompt"
         Write-Info "  [Unattended] Using default: $Default"
         $path = $Default
-    } else {
+    }
+    else {
         Write-Host ""
         Write-Host "  $Prompt" -ForegroundColor White
         Write-Host "  [Default: $Default]" -ForegroundColor DarkGray
-        $inp  = Read-Host "  Path (press Enter for default)"
+        $inp = Read-Host "  Path (press Enter for default)"
         $path = if ($inp.Trim() -eq "") { $Default } else { $inp.Trim() }
     }
     if ($MustExist -and -not (Test-Path $path)) {
@@ -533,18 +557,18 @@ function Resolve-WimEsdFolder {
     Write-Info "Scanning $Folder for install.wim or install.esd..."
 
     $wimFile = Get-ChildItem -LiteralPath $Folder -Filter "install.wim" -ErrorAction SilentlyContinue |
-               Select-Object -First 1
+    Select-Object -First 1
     if (-not $wimFile) {
         $wimFile = Get-ChildItem -LiteralPath $Folder -Filter "install.esd" -ErrorAction SilentlyContinue |
-                   Select-Object -First 1
+        Select-Object -First 1
     }
     if (-not $wimFile) {
         Write-Info "Searching recursively..."
         $wimFile = Get-ChildItem -LiteralPath $Folder -Filter "install.wim" -Recurse -ErrorAction SilentlyContinue |
-                   Select-Object -First 1
+        Select-Object -First 1
         if (-not $wimFile) {
             $wimFile = Get-ChildItem -LiteralPath $Folder -Filter "install.esd" -Recurse -ErrorAction SilentlyContinue |
-                       Select-Object -First 1
+            Select-Object -First 1
         }
     }
     if (-not $wimFile) {
@@ -557,7 +581,8 @@ function Resolve-WimEsdFolder {
     if ($LanguagesAndOptionalFeaturesPath -and (Test-Path -LiteralPath $LanguagesAndOptionalFeaturesPath)) {
         $lpRoot = $LanguagesAndOptionalFeaturesPath
         Write-OK "LP/FoD source (explicit): $lpRoot"
-    } else {
+    }
+    else {
         if ($LanguagesAndOptionalFeaturesPath) {
             Write-Warn "LanguagesAndOptionalFeaturesPath not found: $LanguagesAndOptionalFeaturesPath"
         }
@@ -565,7 +590,8 @@ function Resolve-WimEsdFolder {
         if (Test-Path -LiteralPath $autoSub) {
             $lpRoot = $autoSub
             Write-OK "LP/FoD source (auto-detected): $lpRoot"
-        } else {
+        }
+        else {
             Write-Warn "No LanguagesAndOptionalFeatures folder found."
             Write-Warn "LP/FoD injection may fail. Set -LanguagesAndOptionalFeaturesPath explicitly."
             $lpRoot = $Folder
@@ -578,7 +604,106 @@ function Resolve-WimEsdFolder {
         FODSearchRoot = $lpRoot
     }
 }
+function Test-LPSourceComplete {
+    # Validates that LPSearchRoot is a usable FOD/LP repository:
+    #   1. required metadata files in root + metadata\ (FATAL if missing)
+    #   2. per-required-locale: LP cab + LanguageFeatures-Basic + per-locale
+    #      CompDB + MINIMUM cab count (WARNING if under threshold)
+    # The minimum-count check catches the common "deleted one or two cabs"
+    # case that produces 0x80070002 at install time. A complete locale has
+    # ~43 cabs (LP + 4× LanguageFeatures + ~38 FoD satellites covering
+    # amd64/wow64, incl. HyperV VM platform and two WMIC packages).
+    # Locales already in the image (en-US) need nothing — DISM resolves
+    # them against installed components, not against the source repo.
+    param(
+        [Parameter(Mandatory)][string]$LPSourceRoot,
+        [string[]]$RequiredLocales,
+        [int]$MinCabsPerLocale = 43
+    )
 
+    $missing = @()
+    $fatal   = $false
+    $localeCounts = @{}
+
+    if (-not (Test-Path -LiteralPath $LPSourceRoot)) {
+        return @{ Missing = @("LPSourceRoot does not exist: $LPSourceRoot"); Fatal = $true; LocaleCounts = @{} }
+    }
+
+    # ── Root-level metadata (fatal) ─────────────────────────────────────────
+    foreach ($f in @(
+        'FoDMetadata_Client.cab',
+        'Microsoft-Windows-FodMetadataServicing-Desktop-Metadata-Package.cab',
+        'Microsoft-Windows-FodMetadataServicing-Desktop-CompDB-Package.cab'
+    )) {
+        if (-not (Test-Path -LiteralPath (Join-Path $LPSourceRoot $f))) {
+            $missing += "root: $f (required)"
+            $fatal = $true
+        }
+    }
+
+    # ── metadata\ subfolder (fatal) ─────────────────────────────────────────
+    $metaDir = Join-Path $LPSourceRoot 'metadata'
+    if (-not (Test-Path -LiteralPath $metaDir)) {
+        $missing += "metadata\ subfolder (required)"
+        $fatal = $true
+    } else {
+        foreach ($f in @(
+            'DesktopTargetCompDB_Neutral.xml.cab',
+            'DesktopTargetCompDB_FOD_Neutral.xml.cab',
+            'DesktopTargetCompDB_FOD_Metadata_Neutral.xml.cab',
+            'DesktopTargetCompDB_Conditions.xml.cab'
+        )) {
+            if (-not (Test-Path -LiteralPath (Join-Path $metaDir $f))) {
+                $missing += "metadata\$f (required)"
+                $fatal = $true
+            }
+        }
+    }
+
+    # ── Per-required-locale (warning) ───────────────────────────────────────
+    if (-not $fatal) {
+        $allCabs = @(Get-ChildItem -LiteralPath $LPSourceRoot -Filter "*.cab" -ErrorAction SilentlyContinue)
+
+        foreach ($locale in @($RequiredLocales | Where-Object { $_ } | Select-Object -Unique)) {
+            $lcLow = $locale.ToLower()
+            $lcRef = $locale   # metadata and FoD names use original case (ru-RU)
+
+            # Locale-specific cabs: "~<locale>~" satellites, LanguageFeatures-<type>-<lc>,
+            # and the main Client-Language-Pack. Uses -match, so a stray leftover
+            # from another locale does NOT count toward this locale.
+            $localeCabs = @($allCabs | Where-Object {
+                $_.Name -match "~$([regex]::Escape($lcRef))~" -or
+                $_.Name -match "LanguageFeatures-[^-]+-$([regex]::Escape($lcLow))-Package" -or
+                $_.Name -match "Client-Language-Pack_x64_$([regex]::Escape($lcLow))\.cab"
+            })
+            $localeCounts[$locale] = $localeCabs.Count
+
+            if ($localeCabs.Count -lt $MinCabsPerLocale) {
+                $missing += "$locale`: only $($localeCabs.Count) locale-specific cabs found, $MinCabsPerLocale+ expected"
+                $missing += "   likely missing: HyperV-OptionalFeature-VirtualMachinePlatform-Client-Disabled-FOD-Package~...~amd64~$lcRef~.cab"
+                $missing += "   likely missing: Microsoft-Windows-WMIC-FoD-Package~...~{amd64,wow64}~$lcRef~.cab"
+            }
+
+            # Individually required files (better messages than count alone)
+            if (-not ($localeCabs | Where-Object { $_.Name -match "Client-Language-Pack_x64_$([regex]::Escape($lcLow))\.cab" })) {
+                $missing += "Microsoft-Windows-Client-Language-Pack_x64_$lcLow.cab (for $locale)"
+            }
+            if (-not ($localeCabs | Where-Object { $_.Name -match "LanguageFeatures-Basic-$([regex]::Escape($lcLow))-Package" })) {
+                $missing += "Microsoft-Windows-LanguageFeatures-Basic-$lcLow-Package~*.cab (for $locale)"
+            }
+            if (Test-Path -LiteralPath $metaDir) {
+                if (-not (Get-ChildItem -LiteralPath $metaDir -Filter "DesktopTargetCompDBForISO_$lcRef.xml.cab" -ErrorAction SilentlyContinue)) {
+                    $missing += "metadata\DesktopTargetCompDBForISO_$lcRef.xml.cab (for $locale)"
+                }
+                if (-not (Get-ChildItem -LiteralPath $metaDir -Filter "DesktopTargetCompDBForISO_FOD_$lcRef.xml.cab" -ErrorAction SilentlyContinue)) {
+                    $missing += "metadata\DesktopTargetCompDBForISO_FOD_$lcRef.xml.cab (for $locale)"
+                }
+            }
+        }
+    }
+
+    return @{ Missing = $missing; Fatal = $fatal; LocaleCounts = $localeCounts }
+}
 # ── MSCatalogLTS / update download ───────────────────────────────────────────
 function Install-MSCatalogLTS {
     [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
@@ -586,20 +711,21 @@ function Install-MSCatalogLTS {
         Import-Module MSCatalogLTS -Force; Write-OK "MSCatalogLTS module loaded"; return $true
     }
     Write-Info "MSCatalogLTS module not found - installing from PSGallery..."
-    $nugetDir  = "$env:ProgramFiles\PackageManagement\ProviderAssemblies\nuget\2.8.5.208"
+    $nugetDir = "$env:ProgramFiles\PackageManagement\ProviderAssemblies\nuget\2.8.5.208"
     $nugetDest = "$nugetDir\Microsoft.PackageManagement.NuGetProvider.dll"
     if (-not (Test-Path $nugetDest)) {
         Write-Info "Installing NuGet provider..."
         New-Item $nugetDir -ItemType Directory -Force | Out-Null
         Invoke-WebRequest -Uri 'https://cdn.oneget.org/providers/Microsoft.PackageManagement.NuGetProvider-2.8.5.208.dll' `
-                          -OutFile $nugetDest -UseBasicParsing
+            -OutFile $nugetDest -UseBasicParsing
     }
     Import-PackageProvider -Name NuGet -RequiredVersion 2.8.5.208 -Force | Out-Null
     try {
         Install-Module -Name MSCatalogLTS -Force -Scope AllUsers -AllowClobber
         Import-Module MSCatalogLTS -Force
         Write-OK "MSCatalogLTS installed and loaded"; return $true
-    } catch {
+    }
+    catch {
         Write-Warn "Could not install MSCatalogLTS: $($_.Exception.Message)"; return $false
     }
 }
@@ -609,19 +735,19 @@ function Invoke-UpdateFolderCleanup {
     if (-not (Test-Path $DownloadDir)) { return }
     $cleaned = 0
     Get-ChildItem $DownloadDir -Filter "*.msu" -ErrorAction SilentlyContinue |
-        Where-Object { $_.Name -match "^windows11\.0-kb\d+-" -and $_.Name -notmatch '_[0-9a-f]{8,}' } |
-        ForEach-Object {
-            $kb = ([regex]::Match($_.Name, 'kb(\d+)', 'IgnoreCase')).Groups[1].Value
-            $hasCanonical = [bool](Get-ChildItem $DownloadDir -Filter "*_KB${kb}*" -ErrorAction SilentlyContinue |
-                                   Where-Object { $_.Name -match '^[0-9]_' })
-            if ($hasCanonical) {
-                Write-Info "Cleanup: removing old-named MSU (canonical exists): $($_.Name)"
-                Remove-Item $_.FullName -Force -ErrorAction SilentlyContinue; $cleaned++
-            }
+    Where-Object { $_.Name -match "^windows11\.0-kb\d+-" -and $_.Name -notmatch '_[0-9a-f]{8,}' } |
+    ForEach-Object {
+        $kb = ([regex]::Match($_.Name, 'kb(\d+)', 'IgnoreCase')).Groups[1].Value
+        $hasCanonical = [bool](Get-ChildItem $DownloadDir -Filter "*_KB${kb}*" -ErrorAction SilentlyContinue |
+            Where-Object { $_.Name -match '^[0-9]_' })
+        if ($hasCanonical) {
+            Write-Info "Cleanup: removing old-named MSU (canonical exists): $($_.Name)"
+            Remove-Item $_.FullName -Force -ErrorAction SilentlyContinue; $cleaned++
         }
+    }
     $canonicalPattern = '^(\d+_[^_]+)_KB(\d+)_(\w+)\.(msu|cab)$'
     $allCanonical = Get-ChildItem $DownloadDir -ErrorAction SilentlyContinue |
-                    Where-Object { $_.Name -match $canonicalPattern }
+    Where-Object { $_.Name -match $canonicalPattern }
     $groups = $allCanonical | Group-Object {
         $m = [regex]::Match($_.Name, $canonicalPattern)
         "$($m.Groups[1].Value)_$($m.Groups[3].Value)_$($m.Groups[4].Value)"
@@ -652,7 +778,7 @@ function Invoke-AutoUpdateDownload {
     $downloaded = 0
 
     foreach ($type in @("LCU", "DotNet")) {
-        $label  = switch ($type) { "LCU" { "Cumulative Update (LCU + SSU)" } "DotNet" { ".NET Framework CU" } }
+        $label = switch ($type) { "LCU" { "Cumulative Update (LCU + SSU)" } "DotNet" { ".NET Framework CU" } }
         $prefix = switch ($type) { "LCU" { "1" } "DotNet" { "2" } }
 
         Write-Host ""
@@ -661,7 +787,8 @@ function Invoke-AutoUpdateDownload {
 
         try {
             $results = Get-MSCatalogUpdate -Search $CatalogSearchTerms[$type] -ErrorAction Stop
-        } catch {
+        }
+        catch {
             Write-Warn "Search failed for $label`: $($_.Exception.Message)"; continue
         }
         if (-not $results -or $results.Count -eq 0) { Write-Warn "No results found for $label."; continue }
@@ -669,8 +796,8 @@ function Invoke-AutoUpdateDownload {
         $buildFilter = $CatalogSearchTerms.BuildFilter
         $filtered = $results | Where-Object {
             $_.Title -notmatch "\bPreview\b" -and
-            $_.Title -notmatch "\bx86\b"     -and
-            $_.Title -notmatch "\barm64\b"   -and
+            $_.Title -notmatch "\bx86\b" -and
+            $_.Title -notmatch "\barm64\b" -and
             ($buildFilter -eq "" -or $_.Title -match [regex]::Escape("($buildFilter") -or $_.Title -match [regex]::Escape("($buildFilter."))
         }
         if (-not $filtered) {
@@ -686,35 +813,37 @@ function Invoke-AutoUpdateDownload {
         Write-Host "  Date    : $($best.LastUpdated)" -ForegroundColor DarkGray
 
         $kbMatch = [regex]::Match($best.Title, "KB\d+")
-        $kbNum   = if ($kbMatch.Success) { $kbMatch.Value } else { "KB_unknown" }
+        $kbNum = if ($kbMatch.Success) { $kbMatch.Value } else { "KB_unknown" }
         $kbLower = $kbNum.ToLower()
         $archMsu = "x64"
         $fileName = if ($type -eq "LCU") {
             "windows11.0-$kbLower-$archMsu.msu"
-        } else {
+        }
+        else {
             "${prefix}_${type}_${kbNum}_x64.msu"
         }
         $destPath = Join-Path $DownloadDir $fileName
 
         if ($type -eq "LCU") {
             $alreadyHave = Get-ChildItem $DownloadDir -Filter "*.msu" -ErrorAction SilentlyContinue |
-                           Where-Object { $_.Name -match $kbNum -and $_.Name -match $archMsu -and
-                                          $_.Name -notmatch "kb5043080" -and $_.Length -gt 1MB } |
-                           Select-Object -First 1
+            Where-Object { $_.Name -match $kbNum -and $_.Name -match $archMsu -and
+                $_.Name -notmatch "kb5043080" -and $_.Length -gt 1MB } |
+            Select-Object -First 1
 
             $lcuCached = $false
             if ($alreadyHave -and $alreadyHave.Name -match '_[0-9a-f]{8,}') {
                 Write-OK "LCU already cached: $($alreadyHave.Name) ($([math]::Round($alreadyHave.Length/1MB,0)) MB)"
                 $destPath = $alreadyHave.FullName
                 $lcuCached = $true
-            } elseif ($alreadyHave) {
+            }
+            elseif ($alreadyHave) {
                 Write-Info "Cached LCU has no hash in filename - re-downloading with correct name..."
                 Remove-Item $alreadyHave.FullName -Force -ErrorAction SilentlyContinue
             }
 
             $checkpointCached = [bool](Get-ChildItem $DownloadDir -Filter "*.msu" -ErrorAction SilentlyContinue |
-                                       Where-Object { $_.Name -match "kb5043080" -and $_.Name -match $archMsu -and
-                                                      $_.Name -match '_[0-9a-f]{8,}' -and $_.Length -gt 1MB })
+                Where-Object { $_.Name -match "kb5043080" -and $_.Name -match $archMsu -and
+                    $_.Name -match '_[0-9a-f]{8,}' -and $_.Length -gt 1MB })
 
             if ($lcuCached -and $checkpointCached) {
                 Write-OK "Checkpoint KB5043080 also cached - done with LCU"
@@ -725,8 +854,8 @@ function Invoke-AutoUpdateDownload {
             Write-Info "     Fetching download URLs via Update Catalog API..."
             try {
                 $guid = $best.Guid
-                $post = @{size = 0; UpdateID = $guid; UpdateIDInfo = $guid} | ConvertTo-Json -Compress
-                $body = @{UpdateIDs = "[$post]"}
+                $post = @{size = 0; UpdateID = $guid; UpdateIDInfo = $guid } | ConvertTo-Json -Compress
+                $body = @{UpdateIDs = "[$post]" }
                 $response = Invoke-WebRequest -Uri "https://www.catalog.update.microsoft.com/DownloadDialog.aspx" `
                     -Body $body -ContentType "application/x-www-form-urlencoded" `
                     -UseBasicParsing -ErrorAction Stop
@@ -767,7 +896,8 @@ function Invoke-AutoUpdateDownload {
                         Start-BitsTransfer -Source $checkpointUrl -Destination $cpPath -ErrorAction Stop
                         Unblock-File -Path $cpPath -ErrorAction SilentlyContinue
                         Write-OK "Checkpoint downloaded: $cpName"
-                    } else {
+                    }
+                    else {
                         Write-Warn "Checkpoint KB5043080 not present in API response for this KB."
                         Write-Warn "Manual download may be required: https://www.catalog.update.microsoft.com (search KB5043080)"
                     }
@@ -775,15 +905,16 @@ function Invoke-AutoUpdateDownload {
 
                 $keepName = if ($lcuCached) { $alreadyHave.Name } else { Split-Path $destPath -Leaf }
                 Get-ChildItem $DownloadDir -Filter "windows11.0-kb*-$archMsu*.msu" -ErrorAction SilentlyContinue |
-                    Where-Object { $_.Name -ne $keepName -and $_.Name -notmatch "kb5043080" } |
-                    ForEach-Object {
-                        Write-Info "Removing superseded LCU: $($_.Name)"
-                        Remove-Item $_.FullName -Force -ErrorAction SilentlyContinue
-                    }
+                Where-Object { $_.Name -ne $keepName -and $_.Name -notmatch "kb5043080" } |
+                ForEach-Object {
+                    Write-Info "Removing superseded LCU: $($_.Name)"
+                    Remove-Item $_.FullName -Force -ErrorAction SilentlyContinue
+                }
 
                 $downloaded++
                 continue
-            } catch {
+            }
+            catch {
                 Write-Fail "LCU/checkpoint download via DownloadDialog API failed: $($_.Exception.Message)"
                 Write-Host ""
                 Write-Host "  Manual download required. Both files must be in: $DownloadDir" -ForegroundColor Yellow
@@ -799,13 +930,14 @@ function Invoke-AutoUpdateDownload {
         }
 
         $alreadyHave = Get-ChildItem $DownloadDir -Filter "*.msu" -ErrorAction SilentlyContinue |
-                       Where-Object { $_.Name -match $kbNum -and $_.Name -match $archMsu -and $_.Length -gt 1MB } |
-                       Select-Object -First 1
+        Where-Object { $_.Name -match $kbNum -and $_.Name -match $archMsu -and $_.Length -gt 1MB } |
+        Select-Object -First 1
         if ($alreadyHave) {
             if ($alreadyHave.FullName -ne $destPath) {
                 Rename-Item $alreadyHave.FullName $destPath -ErrorAction SilentlyContinue
                 Write-OK "Found in cache (renamed to canonical): $fileName"
-            } else {
+            }
+            else {
                 Write-OK "Already downloaded: $fileName ($([math]::Round($alreadyHave.Length/1MB,0)) MB)"
             }
             $downloaded++; continue
@@ -824,7 +956,8 @@ function Invoke-AutoUpdateDownload {
                 Write-OK "Downloaded: $fileName ($([math]::Round((Get-Item $destPath).Length/1MB,0)) MB)"
                 $downloaded++
             }
-        } catch {
+        }
+        catch {
             Write-Warn "Download failed for $label`: $($_.Exception.Message)"
             if (Test-Path $destPath) { Remove-Item $destPath -Force -ErrorAction SilentlyContinue }
         }
@@ -855,7 +988,7 @@ $dismOut = & dism.exe /English /? 2>&1
 if ($LASTEXITCODE -gt 1) { Write-Fail "DISM not found."; exit 1 }
 Write-OK "DISM available"
 
-$drive  = Get-PSDrive ($env:SystemDrive.TrimEnd(':'))
+$drive = Get-PSDrive ($env:SystemDrive.TrimEnd(':'))
 $freeGB = [math]::Round($drive.Free / 1GB, 1)
 if ($freeGB -lt 30) { Write-Warn "Only $freeGB GB free. At least 30 GB recommended." }
 else { Write-OK "$freeGB GB free disk space" }
@@ -864,10 +997,11 @@ $internetOK = $false
 try {
     [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
     $null = Invoke-WebRequest "https://www.catalog.update.microsoft.com" -UseBasicParsing -TimeoutSec 10 `
-                -Headers @{ "User-Agent" = "Mozilla/5.0 (Windows NT 10.0; Win64; x64)" }
+        -Headers @{ "User-Agent" = "Mozilla/5.0 (Windows NT 10.0; Win64; x64)" }
     $internetOK = $true
     Write-OK "Internet access available"
-} catch {
+}
+catch {
     Write-Warn "No internet access detected ($($_.Exception.Message))"
     Write-Warn "Automatic update download not available - manual mode only"
 }
@@ -893,15 +1027,16 @@ Write-Info "Scanning $WimEsdPath for install.wim or install.esd..."
 $wimEsdDiscovered = Resolve-WimEsdFolder -Folder $WimEsdPath `
     -LanguagesAndOptionalFeaturesPath $LanguagesAndOptionalFeaturesPath
 
-$wimFile       = $null
-$LPSearchRoot  = $null
+$wimFile = $null
+$LPSearchRoot = $null
 $FODSearchRoot = $null
 
 if ($wimEsdDiscovered) {
-    $wimFile       = $wimEsdDiscovered.WimFile
-    $LPSearchRoot  = $wimEsdDiscovered.LPSearchRoot
+    $wimFile = $wimEsdDiscovered.WimFile
+    $LPSearchRoot = $wimEsdDiscovered.LPSearchRoot
     $FODSearchRoot = $wimEsdDiscovered.FODSearchRoot
-} else {
+}
+else {
     Write-Fail "No install.wim or install.esd found in: $WimEsdPath"
     Write-Host ""
     Write-Host "  Make sure install.wim or install.esd is present in the folder." -ForegroundColor Yellow
@@ -923,15 +1058,18 @@ if ($WimIndex -ne 0) {
     $chosenImage = $images | Where-Object { $_.ImageIndex -eq $WimIndex }
     if (-not $chosenImage) { Write-Fail "Index $WimIndex not found in WIM."; exit 1 }
     Write-OK "Using forced index: [$WimIndex] $($chosenImage.ImageName)"
-} elseif ($enterpriseImage) {
-    $WimIndex    = $enterpriseImage.ImageIndex
+}
+elseif ($enterpriseImage) {
+    $WimIndex = $enterpriseImage.ImageIndex
     $chosenImage = $enterpriseImage
     Write-OK "Auto-selected: [$WimIndex] $($chosenImage.ImageName)"
-} elseif (@($images).Count -eq 1) {
+}
+elseif (@($images).Count -eq 1) {
     $chosenImage = @($images)[0]
-    $WimIndex    = $chosenImage.ImageIndex
+    $WimIndex = $chosenImage.ImageIndex
     Write-OK "Auto-selected (only edition available): [$WimIndex] $($chosenImage.ImageName)"
-} else {
+}
+else {
     Write-Warn "Could not auto-detect Enterprise edition. Available editions:"
     foreach ($img in $images) { Write-Host ("    [{0}] {1}" -f $img.ImageIndex, $img.ImageName) -ForegroundColor White }
     Write-Host ""
@@ -939,13 +1077,13 @@ if ($WimIndex -ne 0) {
         Write-Fail "Unattended mode: cannot prompt for WIM index. Use -WimIndex to specify one."
         exit 1
     }
-    $WimIndex    = [int](Read-Host "  Enter index number")
+    $WimIndex = [int](Read-Host "  Enter index number")
     $chosenImage = $images | Where-Object { $_.ImageIndex -eq $WimIndex }
     if (-not $chosenImage) { Write-Fail "Index $WimIndex not found."; exit 1 }
     Write-OK "Selected: [$WimIndex] $($chosenImage.ImageName)"
 }
 
-$chosenImageFull    = Get-WindowsImage -ImagePath $wimFile -Index $WimIndex
+$chosenImageFull = Get-WindowsImage -ImagePath $wimFile -Index $WimIndex
 $CatalogSearchTerms = Get-CatalogSearchTerms -WimVersion $chosenImageFull.Version
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -956,10 +1094,12 @@ $allLPCabs = @()
 if (-not $SkipLanguagePacks) {
     if ($Languages -ne "") {
         $ResolvedLocales = @(Resolve-LanguageCodes -CodeString $Languages)
-    } elseif ($Unattended) {
+    }
+    elseif ($Unattended) {
         Write-Info "Unattended with no -Languages - skipping language packs (English only)."
         $SkipLanguagePacks = $true
-    } else {
+    }
+    else {
         Write-Host ""
         Write-Host "  Supported language codes:" -ForegroundColor White
         Write-Host "  $SupportedCodesLine" -ForegroundColor Cyan
@@ -981,21 +1121,59 @@ if (-not $SkipLanguagePacks) {
     Write-Info "Scanning language pack folder (this may take a moment)..."
     $allLPCabs = @(Get-ChildItem $LPSearchRoot -Filter "*.cab" -ErrorAction SilentlyContinue)
     Write-Info "Found $($allLPCabs.Count) cab files in LP folder."
+    # ── Pre-flight: validate LPSearchRoot is a usable repository ────────────
+    $lpCheck = Test-LPSourceComplete -LPSourceRoot $LPSearchRoot `
+        -RequiredLocales $ResolvedLocales -MinCabsPerLocale 43
+    # Show per-locale counts so the operator sees the threshold at a glance
+    if ($lpCheck.LocaleCounts.Count -gt 0) {
+        foreach ($loc in ($lpCheck.LocaleCounts.Keys | Sort-Object)) {
+            $cnt = $lpCheck.LocaleCounts[$loc]
+            $col = if ($cnt -ge 43) { "Green" } elseif ($cnt -ge 30) { "Yellow" } else { "Red" }
+            Write-Host ("    [{0}] {1} locale-specific cabs" -f $loc, $cnt) -ForegroundColor $col
+        }
+    }
 
-    $lpArchStr  = "x64"
+    if ($lpCheck.Missing.Count -gt 0) {
+        Write-Host ""
+        if ($lpCheck.Fatal) {
+            Write-Fail "LP repository is missing required metadata files:"
+            $lpCheck.Missing | ForEach-Object { Write-Host "    - $_" -ForegroundColor Red }
+            Write-Host ""
+            Write-Host "  Copy FoDMetadata_Client.cab, FodMetadataServicing-*.cab, and the" -ForegroundColor Yellow
+            Write-Host "  metadata\DesktopTargetCompDB_*.xml.cab files from the original" -ForegroundColor Yellow
+            Write-Host "  LanguagesAndOptionalFeatures folder." -ForegroundColor Yellow
+            Write-Host ""
+            if ($Unattended) { exit 1 }
+            if (-not (Confirm-Continue "Continue anyway (LP install will fail)?")) {
+                exit 0
+            }
+        } else {
+            Write-Warn "LP repository incomplete for requested locales:"
+            $lpCheck.Missing | ForEach-Object { Write-Host "    - $_" -ForegroundColor Yellow }
+            Write-Host ""
+            Write-Host "  Restore the missing .cab files from the original LanguagesAndOptionalFeatures" -ForegroundColor Yellow
+            Write-Host "  folder. Removing any locale-specific cab that DISM expects at install" -ForegroundColor Yellow
+            Write-Host "  time produces 0x80070002 (file not found)." -ForegroundColor Yellow
+            Write-Host ""
+        }
+    } else {
+        $countsStr = ($lpCheck.LocaleCounts.Keys | Sort-Object | ForEach-Object { "$_=$($lpCheck.LocaleCounts[$_])" }) -join ", "
+        Write-OK "LP repository complete ($countsStr locale-specific cabs)"
+    }
+    $lpArchStr = "x64"
     $fodArchStr = "amd64"
 
     $anyMissing = $false
     foreach ($lang in $ResolvedLocales) {
-        $lp  = $allLPCabs | Where-Object { $_.Name -match "Language-Pack_${lpArchStr}_$lang" } | Select-Object -First 1
+        $lp = $allLPCabs | Where-Object { $_.Name -match "Language-Pack_${lpArchStr}_$lang" } | Select-Object -First 1
         $fod = $allLPCabs | Where-Object { $_.Name -match "LanguageFeatures-Basic-$lang" -and
-                                           $_.Name -match "~${fodArchStr}~" } | Select-Object -First 1
-        if (-not $lp)  { $anyMissing = $true }
+            $_.Name -match "~${fodArchStr}~" } | Select-Object -First 1
+        if (-not $lp) { $anyMissing = $true }
         if (-not $fod) { $anyMissing = $true }
-        $lc  = if ($lp)  { "Green" } else { "Red" }
-        $fc  = if ($fod) { "Green" } else { "Red" }
+        $lc = if ($lp) { "Green" } else { "Red" }
+        $fc = if ($fod) { "Green" } else { "Red" }
         Write-Host ("  [$($lang.ToUpper())]  LP: ") -NoNewline
-        Write-Host ("{0,-8}" -f $(if ($lp)  { "OK" } else { "MISSING" })) -ForegroundColor $lc -NoNewline
+        Write-Host ("{0,-8}" -f $(if ($lp) { "OK" } else { "MISSING" })) -ForegroundColor $lc -NoNewline
         Write-Host "  FOD Basic: " -NoNewline
         Write-Host ("{0,-8}" -f $(if ($fod) { "OK" } else { "MISSING" })) -ForegroundColor $fc -NoNewline
         Write-Host "  [$(if ($lp) { $lp.Name } else { 'NOT FOUND' })]" -ForegroundColor DarkGray
@@ -1015,7 +1193,8 @@ if (-not $SkipLanguagePacks) {
         if (-not (Confirm-Continue "Continue anyway (missing languages will be skipped)?")) {
             exit 0
         }
-    } else {
+    }
+    else {
         Write-OK "All language pack files found"
     }
 }
@@ -1034,7 +1213,8 @@ if (-not $SkipUpdates) {
             Get-ChildItem $resolvedUpdatePath -Filter "*.cab" -ErrorAction SilentlyContinue
         ).Count
         Write-OK "Using specified update folder: $UpdatePath ($updCount files)"
-    } elseif ($internetOK) {
+    }
+    elseif ($internetOK) {
         Write-Host ""
         Write-Host "  Automatic download from Microsoft Update Catalog." -ForegroundColor White
         Write-Host "  The script will search and download the latest version of:" -ForegroundColor DarkGray
@@ -1054,7 +1234,8 @@ if (-not $SkipUpdates) {
                 try {
                     New-Item $cacheDir -ItemType Directory -Force | Out-Null
                     Write-OK "Created update folder: $cacheDir"
-                } catch {
+                }
+                catch {
                     Write-Warn "Cannot create update folder: $($_.Exception.Message)"
                     $cacheDir = $null
                 }
@@ -1100,10 +1281,12 @@ if (-not $SkipUpdates) {
                 $resolvedUpdatePath = $manualPath
                 Write-Info "Found $($updFiles.Count) update file(s):"
                 $updFiles | ForEach-Object { Write-Host "    $($_.Name)" -ForegroundColor White }
-            } else {
+            }
+            else {
                 Write-Warn "No .msu/.cab files found - skipping updates."
             }
-        } else {
+        }
+        else {
             Write-Warn "Skipping updates."
         }
     }
@@ -1112,9 +1295,9 @@ if (-not $SkipUpdates) {
     # or manual prompt (previously on "elseif", so manual path skipped it).
     if ($resolvedUpdatePath -and (Test-Path $resolvedUpdatePath)) {
         $lcuInFolder = Get-ChildItem $resolvedUpdatePath -Filter "windows11.0-kb*-x64*.msu" -ErrorAction SilentlyContinue |
-                       Where-Object { $_.Name -notmatch "kb5043080" } | Select-Object -First 1
-        $cpInFolder  = Get-ChildItem $resolvedUpdatePath -Filter "*kb5043080*.msu" -ErrorAction SilentlyContinue |
-                       Select-Object -First 1
+        Where-Object { $_.Name -notmatch "kb5043080" } | Select-Object -First 1
+        $cpInFolder = Get-ChildItem $resolvedUpdatePath -Filter "*kb5043080*.msu" -ErrorAction SilentlyContinue |
+        Select-Object -First 1
         if ($lcuInFolder -and -not $cpInFolder) {
             Write-Host ""
             Write-Warn "LCU found but checkpoint KB5043080 is missing from: $resolvedUpdatePath"
@@ -1129,7 +1312,8 @@ if (-not $SkipUpdates) {
                     exit 0
                 }
             }
-        } elseif ($lcuInFolder -and $cpInFolder) {
+        }
+        elseif ($lcuInFolder -and $cpInFolder) {
             Write-OK "Checkpoint KB5043080 found: $($cpInFolder.Name)"
         }
     }
@@ -1140,13 +1324,14 @@ if (-not $SkipUpdates) {
 # ═════════════════════════════════════════════════════════════════════════════
 Write-Section "Step 4/4 - Output"
 
-$_buildStr   = $chosenImageFull.Version -replace '^\d+\.\d+\.', ''
+$_buildStr = $chosenImageFull.Version -replace '^\d+\.\d+\.', ''
 $_versionStr = $CatalogSearchTerms.VersionString
-$_dateStr    = Get-Date -Format "yyyyMMdd"
+$_dateStr = Get-Date -Format "yyyyMMdd"
 
 $_langStr = if ($SkipLanguagePacks -or @($ResolvedLocales).Count -eq 0) {
     "en"
-} else {
+}
+else {
     $rawCodes = $Languages.ToLower().Split(',') | ForEach-Object { $_.Trim() } | Where-Object { $_ -ne "" }
     if ($rawCodes) { $rawCodes -join "_" } else { "en" }
 }
@@ -1154,7 +1339,8 @@ $_autoName = "Win11_${_versionStr}_${_buildStr}_${_langStr}_${_dateStr}.wim"
 
 if ($OutputPath -and (Test-Path $OutputPath -PathType Container)) {
     $OutputPath = Join-Path $OutputPath $_autoName
-} elseif ($OutputPath -and -not [System.IO.Path]::GetExtension($OutputPath)) {
+}
+elseif ($OutputPath -and -not [System.IO.Path]::GetExtension($OutputPath)) {
     $OutputPath = Join-Path $OutputPath $_autoName
 }
 
@@ -1167,7 +1353,8 @@ $OutputPath = Read-PathWithDefault `
 
 if ($OutputPath -and (Test-Path $OutputPath -PathType Container)) {
     $OutputPath = Join-Path $OutputPath $_autoName
-} elseif ($OutputPath -and -not [System.IO.Path]::GetExtension($OutputPath)) {
+}
+elseif ($OutputPath -and -not [System.IO.Path]::GetExtension($OutputPath)) {
     $OutputPath = Join-Path $OutputPath $_autoName
 }
 
@@ -1195,7 +1382,8 @@ if (-not (Test-Path $workRoot)) {
     try {
         New-Item $workRoot -ItemType Directory -Force | Out-Null
         Write-OK "Created work folder: $workRoot"
-    } catch {
+    }
+    catch {
         Write-Fail "Cannot create work folder: $($_.Exception.Message)"
         exit 1
     }
@@ -1224,14 +1412,16 @@ if (-not $SkipUpdates -and $resolvedUpdatePath) {
         Get-ChildItem $resolvedUpdatePath -Filter "*.cab" -ErrorAction SilentlyContinue
     ).Count
     Write-Host "    Updates       : $resolvedUpdatePath ($n files)" -ForegroundColor Cyan
-} elseif (-not $SkipUpdates) {
+}
+elseif (-not $SkipUpdates) {
     Write-Host "    Updates       : Skipped" -ForegroundColor Yellow
 }
 
 if ($FoDList -ne "") { Write-Host "    Features (FoD): $FoDList" -ForegroundColor Cyan }
 if ($DriverListPath -ne "") {
     Write-Host "    Drivers       : $DriverListPath (selected list)" -ForegroundColor Cyan
-} elseif ($DriverPath -ne "") {
+}
+elseif ($DriverPath -ne "") {
     Write-Host "    Drivers       : $DriverPath (full folder)" -ForegroundColor Cyan
 }
 Write-Host "    Output WIM    : $OutputPath" -ForegroundColor Cyan
@@ -1247,10 +1437,10 @@ if (-not (Confirm-Continue "Start servicing now?")) {
 }
 
 # ── Work dirs and log ────────────────────────────────────────────────────────
-$mountDir   = Join-Path $workRoot "Mount"
-$workWim    = Join-Path $workRoot "install_work.wim"
+$mountDir = Join-Path $workRoot "Mount"
+$workWim = Join-Path $workRoot "install_work.wim"
 $scratchDir = Join-Path $workRoot "Scratch"
-$logFile    = Join-Path $outputDir ("WIMServicing_{0}.log" -f (Get-Date -Format "yyyyMMdd_HHmm"))
+$logFile = Join-Path $outputDir ("WIMServicing_{0}.log" -f (Get-Date -Format "yyyyMMdd_HHmm"))
 
 @($workRoot, $mountDir, $scratchDir) | ForEach-Object {
     if (-not (Test-Path $_)) { New-Item $_ -ItemType Directory -Force | Out-Null }
@@ -1270,7 +1460,8 @@ if (($AppxListPath -is [string]) -and ($AppxListPath.Length -gt 0) -and (Test-Pa
         [array]$pkgNodes = $AppxXml.AppxRemovalList.Package
         if ($null -eq $pkgNodes -or $pkgNodes.Count -eq 0 -or $null -eq $pkgNodes[0]) {
             $AppxToRemove = @()
-        } else {
+        }
+        else {
             $AppxToRemove = @($pkgNodes | ForEach-Object { $_.Id } | Where-Object { $_ })
         }
         Write-Info "Loaded custom Appx list from: $AppxListPath ($($AppxToRemove.Count) packages)"
@@ -1279,12 +1470,14 @@ if (($AppxListPath -is [string]) -and ($AppxListPath.Length -gt 0) -and (Test-Pa
             Write-Info "Appx list is empty - skipping Appx removal"
             $SkipAppxRemoval = $true
         }
-    } catch {
+    }
+    catch {
         Write-Warn "Could not load AppxListPath: $($_.Exception.Message) - using default list"
         Write-Log "WARN: Could not load AppxListPath: $($_.Exception.Message)" "WARN"
         $AppxToRemove = $AppxToRemoveDefault
     }
-} else {
+}
+else {
     $AppxToRemove = $AppxToRemoveDefault
 }
 
@@ -1294,22 +1487,22 @@ if (-not $SkipAppxRemoval) {
 
 # Cut-pasteable command line for the log
 $_cmdParts = @(".\WimWizard.ps1")
-if ($WimEsdPath)       { $_cmdParts += "-WimEsdPath `"$WimEsdPath`"" }
+if ($WimEsdPath) { $_cmdParts += "-WimEsdPath `"$WimEsdPath`"" }
 if ($LanguagesAndOptionalFeaturesPath) { $_cmdParts += "-LanguagesAndOptionalFeaturesPath `"$LanguagesAndOptionalFeaturesPath`"" }
-if ($OutputPath)       { $_cmdParts += "-OutputPath `"$OutputPath`"" }
-if ($WimIndex -ne 0)   { $_cmdParts += "-WimIndex $WimIndex" }
-if ($Languages)        { $_cmdParts += "-Languages `"$Languages`"" }
-if ($UpdatePath)       { $_cmdParts += "-UpdatePath `"$UpdatePath`"" }
-if ($FoDList)          { $_cmdParts += "-FoDList `"$FoDList`"" }
-if ($DriverPath)       { $_cmdParts += "-DriverPath `"$DriverPath`"" }
-if ($DriverListPath)   { $_cmdParts += "-DriverListPath `"$DriverListPath`"" }
-if ($AppxListPath)     { $_cmdParts += "-AppxListPath `"$AppxListPath`"" }
-if ($SkipUpdates)      { $_cmdParts += "-SkipUpdates" }
-if ($SkipLanguagePacks){ $_cmdParts += "-SkipLanguagePacks" }
-if ($SkipAppxRemoval)  { $_cmdParts += "-SkipAppxRemoval" }
+if ($OutputPath) { $_cmdParts += "-OutputPath `"$OutputPath`"" }
+if ($WimIndex -ne 0) { $_cmdParts += "-WimIndex $WimIndex" }
+if ($Languages) { $_cmdParts += "-Languages `"$Languages`"" }
+if ($UpdatePath) { $_cmdParts += "-UpdatePath `"$UpdatePath`"" }
+if ($FoDList) { $_cmdParts += "-FoDList `"$FoDList`"" }
+if ($DriverPath) { $_cmdParts += "-DriverPath `"$DriverPath`"" }
+if ($DriverListPath) { $_cmdParts += "-DriverListPath `"$DriverListPath`"" }
+if ($AppxListPath) { $_cmdParts += "-AppxListPath `"$AppxListPath`"" }
+if ($SkipUpdates) { $_cmdParts += "-SkipUpdates" }
+if ($SkipLanguagePacks) { $_cmdParts += "-SkipLanguagePacks" }
+if ($SkipAppxRemoval) { $_cmdParts += "-SkipAppxRemoval" }
 if ($SkipDefenderUpdate) { $_cmdParts += "-SkipDefenderUpdate" }
-if ($Unattended)       { $_cmdParts += "-Unattended" }
-if ($DebugBuild)       { $_cmdParts += "-DebugBuild" }
+if ($Unattended) { $_cmdParts += "-Unattended" }
+if ($DebugBuild) { $_cmdParts += "-DebugBuild" }
 Write-Log ($_cmdParts -join " ")
 Write-Log "WIM/ESD source: $WimEsdPath  WIM: $wimFile  Index: $WimIndex  Edition: $($chosenImage.ImageName)"
 Write-Log "Work folder: $workRoot"
@@ -1323,10 +1516,10 @@ $DefenderKitScriptKnownHash = '5684930AE11529387E78A0BA0A61BA2971E45CAAED941694A
 function Get-DefenderKitScriptHash {
     param([string]$Path)
     $text = [System.IO.File]::ReadAllText($Path)
-    $idx  = $text.IndexOf('# SIG # Begin signature block')
+    $idx = $text.IndexOf('# SIG # Begin signature block')
     if ($idx -ge 0) { $text = $text.Substring(0, $idx) }
     $norm = [regex]::Replace($text, '\s+', '')
-    $sha  = [System.Security.Cryptography.SHA256]::Create()
+    $sha = [System.Security.Cryptography.SHA256]::Create()
     try { $bytes = $sha.ComputeHash([System.Text.Encoding]::UTF8.GetBytes($norm)) }
     finally { $sha.Dispose() }
     return ([System.BitConverter]::ToString($bytes) -replace '-', '')
@@ -1335,7 +1528,7 @@ function Get-DefenderKitScriptHash {
 function Get-ImageArchTag {
     param($ImageInfo)
     $a = [string]$ImageInfo.Architecture
-    if ($a -eq '9'  -or $a -eq 'x64') { return 'amd64' }
+    if ($a -eq '9' -or $a -eq 'x64') { return 'amd64' }
     return $null
 }
 
@@ -1348,11 +1541,12 @@ function Initialize-DefenderKit {
     $zipPath = Join-Path $CacheDir "defender-update-kit-$ArchTag.zip"
 
     if (Test-Path -LiteralPath $zipPath) {
-        $age     = (Get-Item -LiteralPath $zipPath).LastWriteTime
+        $age = (Get-Item -LiteralPath $zipPath).LastWriteTime
         $ageDays = [math]::Round(((Get-Date) - $age).TotalDays, 1)
         Write-OK "Defender kit cached: $zipPath (age: $ageDays days)"
         Write-Log "Defender kit using cached copy: $zipPath (age: $ageDays days)"
-    } else {
+    }
+    else {
         if (-not $internetOK) {
             Write-Warn "No internet and no cached Defender kit - skipping Defender update"
             Write-Log "WARN: No internet and no cached Defender kit - skipped" "WARN"
@@ -1371,12 +1565,14 @@ function Initialize-DefenderKit {
             $mb = [math]::Round((Get-Item -LiteralPath $zipPath).Length / 1MB, 0)
             Write-OK "Defender kit downloaded ($mb MB)"
             Write-Log "Defender kit downloaded: $zipPath ($mb MB)"
-        } catch {
+        }
+        catch {
             Write-Warn "Defender kit download failed: $($_.Exception.Message)"
             Write-Log "WARN: Defender kit download failed: $($_.Exception.Message)" "WARN"
             Remove-Item -LiteralPath $tmpPath -Force -ErrorAction SilentlyContinue
             return $null
-        } finally { $ProgressPreference = $oldPP }
+        }
+        finally { $ProgressPreference = $oldPP }
     }
 
     if (-not (Test-Path -LiteralPath $zipPath)) {
@@ -1408,14 +1604,17 @@ function Initialize-DefenderKit {
         if ([string]::IsNullOrEmpty($DefenderKitScriptKnownHash)) {
             Write-Info "DefenderUpdateWinImage.ps1 hash (no baseline set): $h"
             Write-Log "Defender kit script hash (no baseline): $h"
-        } elseif ($h -ne $DefenderKitScriptKnownHash) {
+        }
+        elseif ($h -ne $DefenderKitScriptKnownHash) {
             Write-Warn "DefenderUpdateWinImage.ps1 has changed since WimWizard's implementation was written."
             Write-Warn "Review its AddUpdate logic against WimWizard. New hash: $h"
             Write-Log "WARN: Defender kit script changed. Expected $DefenderKitScriptKnownHash, got $h" "WARN"
-        } else {
+        }
+        else {
             Write-OK "DefenderUpdateWinImage.ps1 unchanged (hash matches baseline)"
         }
-    } else {
+    }
+    else {
         Write-Warn "DefenderUpdateWinImage.ps1 not found in kit - cannot check for logic changes"
         Write-Log "WARN: DefenderUpdateWinImage.ps1 missing from kit" "WARN"
     }
@@ -1424,12 +1623,12 @@ function Initialize-DefenderKit {
     if ($LASTEXITCODE -ne 0) { throw "expand.exe failed (exit $LASTEXITCODE): $(($expOut | Out-String).Trim())" }
 
     $xmlPath = Join-Path $cabOut 'package-defender.xml'
-    $defSrc  = Join-Path $cabOut 'Definition Updates\Updates'
+    $defSrc = Join-Path $cabOut 'Definition Updates\Updates'
     $platSrc = Join-Path $cabOut 'Platform'
     foreach ($p in @($xmlPath, $defSrc, $platSrc)) {
         if (-not (Test-Path -LiteralPath $p)) { throw "Unexpected kit layout - missing: $($p.Substring($cabOut.Length + 1))" }
     }
-    if (@(Get-ChildItem -LiteralPath $defSrc -Force).Count -eq 0)  { throw "Unexpected kit layout - 'Definition Updates\Updates' is empty" }
+    if (@(Get-ChildItem -LiteralPath $defSrc -Force).Count -eq 0) { throw "Unexpected kit layout - 'Definition Updates\Updates' is empty" }
     if (@(Get-ChildItem -LiteralPath $platSrc -Force).Count -eq 0) { throw "Unexpected kit layout - 'Platform' is empty" }
 
     try {
@@ -1441,26 +1640,27 @@ function Initialize-DefenderKit {
             EngineVersion    = [string]$x.packageinfo.versions.engine
             SignatureVersion = [string]$x.packageinfo.versions.signatures
         }
-    } catch { throw "package-defender.xml is missing expected fields: $($_.Exception.Message)" }
+    }
+    catch { throw "package-defender.xml is missing expected fields: $($_.Exception.Message)" }
 
     if ($pkg.Arch -notmatch $ArchTag) {
         throw "Defender kit architecture '$($pkg.Arch)' does not match image architecture '$ArchTag'"
     }
 
     Write-OK ("Defender package {0} (platform {1}, engine {2}, security intelligence {3})" -f `
-        $pkg.PackageVersion, $pkg.PlatformVersion, $pkg.EngineVersion, $pkg.SignatureVersion)
+            $pkg.PackageVersion, $pkg.PlatformVersion, $pkg.EngineVersion, $pkg.SignatureVersion)
     Write-Log ("Defender kit ready: package {0}, platform {1}, engine {2}, SI {3}" -f `
-        $pkg.PackageVersion, $pkg.PlatformVersion, $pkg.EngineVersion, $pkg.SignatureVersion)
+            $pkg.PackageVersion, $pkg.PlatformVersion, $pkg.EngineVersion, $pkg.SignatureVersion)
 
     $pkg.XmlPath = $xmlPath
-    $pkg.DefSrc  = $defSrc
+    $pkg.DefSrc = $defSrc
     $pkg.PlatSrc = $platSrc
     return $pkg
 }
 
 function Clear-DefenderKitFromImage {
     param([string]$MountPath)
-    $base   = Join-Path $MountPath 'ProgramData\Microsoft\Windows Defender'
+    $base = Join-Path $MountPath 'ProgramData\Microsoft\Windows Defender'
     $marker = Join-Path $MountPath 'Windows\Temp\package-defender.xml'
     foreach ($sub in @('Definition Updates\Updates', 'Platform')) {
         $t = Join-Path $base $sub
@@ -1474,11 +1674,11 @@ function Clear-DefenderKitFromImage {
 function Install-DefenderKitToImage {
     param([hashtable]$Kit, [string]$MountPath)
 
-    $base       = Join-Path $MountPath 'ProgramData\Microsoft\Windows Defender'
-    $defTarget  = Join-Path $base 'Definition Updates\Updates'
+    $base = Join-Path $MountPath 'ProgramData\Microsoft\Windows Defender'
+    $defTarget = Join-Path $base 'Definition Updates\Updates'
     $platTarget = Join-Path $base 'Platform'
     $tempTarget = Join-Path $MountPath 'Windows\Temp'
-    $marker     = Join-Path $tempTarget 'package-defender.xml'
+    $marker = Join-Path $tempTarget 'package-defender.xml'
 
     try {
         if (Test-Path -LiteralPath $marker) {
@@ -1499,14 +1699,16 @@ function Install-DefenderKitToImage {
         Write-OK "Defender updated in image (package $($Kit.PackageVersion))"
         Write-Log "Defender update applied: package $($Kit.PackageVersion)"
         return $true
-    } catch {
+    }
+    catch {
         Write-Warn "Defender update failed: $($_.Exception.Message)"
         Write-Log "WARN: Defender update failed: $($_.Exception.Message) - rolling back" "WARN"
         try {
             Clear-DefenderKitFromImage -MountPath $MountPath
             Write-Warn "Defender changes rolled back - image keeps its inbox Defender"
             Write-Log "Defender rollback OK" "WARN"
-        } catch {
+        }
+        catch {
             throw "Defender update failed and rollback also failed ($($_.Exception.Message)) - image state is inconsistent, aborting build"
         }
         return $false
@@ -1526,7 +1728,8 @@ try {
             -DestinationImagePath $workWim -CompressionType fast
         $workWimIndex = 1
         Write-OK "ESD exported to WIM"
-    } else {
+    }
+    else {
         Copy-Item $wimFile $workWim -Force
         Set-ItemProperty $workWim -Name IsReadOnly -Value $false
         $workWimIndex = $WimIndex
@@ -1535,28 +1738,30 @@ try {
     Write-Log "WIM copied: $workWim (index $workWimIndex)"
 
     # Defender kit - prepare BEFORE mount
-    $script:DefenderKit    = $null
+    $script:DefenderKit = $null
     $script:DefenderStatus = "Skipped (-SkipDefenderUpdate)"
     if (-not $SkipDefenderUpdate) {
         Write-Section "Defender update kit (KB4568292)"
         try {
             $defImgInfo = Get-WindowsImage -ImagePath $workWim -Index $workWimIndex -ErrorAction Stop
-            $defArch    = Get-ImageArchTag -ImageInfo $defImgInfo
+            $defArch = Get-ImageArchTag -ImageInfo $defImgInfo
             if (-not $defArch) { throw "unsupported image architecture '$($defImgInfo.Architecture)'" }
             $defKitCacheDir = if ($resolvedUpdatePath -and (Test-Path $resolvedUpdatePath)) {
                 Join-Path $resolvedUpdatePath "DefenderKit"
-            } else {
+            }
+            else {
                 Join-Path $ScriptRoot "Updates\DefenderKit"
             }
             $script:DefenderKit = Initialize-DefenderKit -ArchTag $defArch `
                 -CacheDir   $defKitCacheDir `
                 -ExtractDir (Join-Path $workRoot "DefenderKit")
             $script:DefenderStatus = if ($script:DefenderKit) { "Pending" } else { "Not applied - no kit available" }
-        } catch {
+        }
+        catch {
             Write-Warn "Defender kit preparation failed: $($_.Exception.Message)"
             Write-Warn "Continuing without Defender update."
             Write-Log "WARN: Defender kit preparation failed: $($_.Exception.Message)" "WARN"
-            $script:DefenderKit    = $null
+            $script:DefenderKit = $null
             $script:DefenderStatus = "Not applied - kit preparation failed (see log)"
         }
     }
@@ -1579,10 +1784,10 @@ try {
     # $applyUpdates gates ONLY enumeration + LCU/DotNet/checkpoint selection.
     # The install.wim pipeline (drivers, LP, FoD, cleanup) runs regardless.
     $allUpdateFiles = @()
-    $dotNetFiles    = @()
-    $lcuFile        = $null
+    $dotNetFiles = @()
+    $lcuFile = $null
     $checkpointFile = $null
-    $lcuAllFiles    = @()
+    $lcuAllFiles = @()
 
     $applyUpdates = (-not $SkipUpdates) -and [bool]$resolvedUpdatePath
     if ($applyUpdates) {
@@ -1594,21 +1799,22 @@ try {
         $dotNetFiles = @($allUpdateFiles | Where-Object { $_.Name -match "^2_DotNet" })
 
         $lcuFile = $allUpdateFiles |
-                   Where-Object { $_.Extension -eq ".msu" -and
-                                  $_.Name -match "^windows11\.0-kb\d+-" -and
-                                  $_.Name -notmatch "kb5043080" } |
-                   Select-Object -First 1
+        Where-Object { $_.Extension -eq ".msu" -and
+            $_.Name -match "^windows11\.0-kb\d+-" -and
+            $_.Name -notmatch "kb5043080" } |
+        Select-Object -First 1
 
         $checkpointFile = $allUpdateFiles |
-                          Where-Object { $_.Extension -eq ".msu" -and
-                                         $_.Name -match "^windows11\.0-kb5043080" } |
-                          Select-Object -First 1
+        Where-Object { $_.Extension -eq ".msu" -and
+            $_.Name -match "^windows11\.0-kb5043080" } |
+        Select-Object -First 1
 
         if ($lcuFile) {
             Write-Info "LCU selected: $($lcuFile.Name)"
             if ($checkpointFile) {
                 Write-Info "Checkpoint selected: $($checkpointFile.Name)"
-            } else {
+            }
+            else {
                 Write-Warn "Checkpoint KB5043080 not found in update folder"
                 Write-Warn "LCU pass 2 may fail with 0x800F0838 if LP/FoD is installed between passes."
                 Write-Warn "Add the checkpoint .msu to: $resolvedUpdatePath"
@@ -1642,15 +1848,18 @@ try {
             $dismResult = & dism.exe /Image:$mountDir /Add-Package /PackagePath:$lcuTempTarget /ScratchDir:$scratchDir 2>&1
             if ($LASTEXITCODE -eq 0) {
                 Write-OK "LCU pass 1 installed"; Write-Log "LCU pass 1 OK: $($lcuFile.Name)"
-            } elseif ($LASTEXITCODE -eq -2146498530) {
+            }
+            elseif ($LASTEXITCODE -eq -2146498530) {
                 Write-Warn "LCU pass 1 not applicable (0x800f081e) - skipping"
                 Write-Log "WARN 0x800f081e LCU pass 1" "WARN"
-            } else {
+            }
+            else {
                 $errMsg = ($dismResult | Where-Object { $_ -match "Error" }) -join " "
                 Remove-Item $lcuTempDir -Recurse -Force -ErrorAction SilentlyContinue
                 throw "LCU pass 1 failed (exit $LASTEXITCODE): $errMsg"
             }
-        } catch {
+        }
+        catch {
             Remove-Item $lcuTempDir -Recurse -Force -ErrorAction SilentlyContinue
             throw
         }
@@ -1668,23 +1877,27 @@ try {
                 try {
                     Add-WindowsPackage -PackagePath $lp.FullName -Path $mountDir -ScratchDirectory $scratchDir | Out-Null
                     Write-OK "LP: $($lp.Name)"; Write-Log "LP: $($lp.FullName)"
-                } catch {
+                }
+                catch {
                     $err = $_.Exception.Message
                     if ($err -match "0x800f0952") {
                         Write-Info "LP $lang already present in base image (0x800f0952) - skipping"
                         Write-Log "LP $lang skipped - already in base image (0x800f0952)" "INFO"
-                    } elseif ($err -match "0x800f081e") {
+                    }
+                    elseif ($err -match "0x800f081e") {
                         Write-Info "LP $lang not applicable (0x800f081e) - skipping"
                         Write-Log "LP $lang skipped - not applicable (0x800f081e)" "INFO"
-                    } else { throw }
+                    }
+                    else { throw }
                 }
-            } else {
+            }
+            else {
                 Write-Warn "LP not found for $lang"; Write-Log "WARN: LP not found for $lang" "WARN"
             }
 
             $FontTagMap = @{
-                'ar-SA'='Arab'; 'he-IL'='Hebr'; 'ja-JP'='Jpan'
-                'ko-KR'='Kore'; 'th-TH'='Thai'; 'zh-CN'='Hans'; 'zh-TW'='Hant'
+                'ar-SA' = 'Arab'; 'he-IL' = 'Hebr'; 'ja-JP' = 'Jpan'
+                'ko-KR' = 'Kore'; 'th-TH' = 'Thai'; 'zh-CN' = 'Hans'; 'zh-TW' = 'Hant'
             }
             if ($FontTagMap.ContainsKey($lang)) {
                 $tag = $FontTagMap[$lang]
@@ -1708,7 +1921,8 @@ try {
             reg unload "HKLM\WW_SOFTWARE" | Out-Null
             Write-OK "Offline registry: language cleanup suppressed for $($ResolvedLocales -join ', ')"
             Write-Log "Registry: BlockCleanupOfUnusedPreinstalledLangPacks=1, locales registered: $($ResolvedLocales -join ', ')"
-        } catch {
+        }
+        catch {
             Write-Warn "Could not configure offline registry: $($_.Exception.Message)"
             try { reg unload "HKLM\WW_SOFTWARE" 2>$null | Out-Null } catch {}
         }
@@ -1720,16 +1934,18 @@ try {
     if (-not $SkipLanguagePacks) {
         foreach ($lang in $ResolvedLocales) {
             Write-Host "  >> Language FoDs: $($lang.ToUpper())" -ForegroundColor White
-            foreach ($fodType in @("Basic","OCR","Handwriting","TextToSpeech","Speech")) {
+            foreach ($fodType in @("Basic", "OCR", "Handwriting", "TextToSpeech", "Speech")) {
                 $capName = "Language.$fodType~~~$lang~0.0.1.0"
                 try {
                     Add-WindowsCapability -Name $capName -Path $mountDir -Source $LPSearchRoot -ScratchDirectory $scratchDir | Out-Null
                     Write-OK "  $fodType"; Write-Log "Language FoD OK: $capName"
-                } catch {
+                }
+                catch {
                     $err = $_.Exception.Message
                     if ($err -match "0x800f081e" -or $err -match "not present\|not applicable") {
                         Write-Info "  $fodType not available for $lang - skipping"
-                    } else {
+                    }
+                    else {
                         Write-Warn "  $fodType failed: $err"
                         Write-Log "WARN Language FoD $capName`: $err" "WARN"
                     }
@@ -1744,37 +1960,39 @@ try {
         # Package-based FoDs (Ethernet, Wifi drivers) use Add-WindowsPackage.
         $FoDCatalog = @{
             # --- Capability-based FoDs (Add-WindowsCapability) ---
-            'PowerShell-ISE' = @{ Label = "PowerShell ISE";        Name = "Microsoft.Windows.PowerShell.ISE~~~~0.0.1.0"; Type = 'Capability' }
-            'SnippingTool'   = @{ Label = "Snipping Tool";         Name = "Microsoft.Windows.SnippingTool~~~~0.0.1.0";   Type = 'Capability' }
-            'VBSCRIPT'       = @{ Label = "VBScript";              Name = "VBSCRIPT~~~~";                               Type = 'Capability' }
-            'Notepad'        = @{ Label = "Notepad";               Name = "Microsoft.Windows.Notepad~~~~0.0.1.0";       Type = 'Capability' }
-            'DeveloperMode'  = @{ Label = "Developer Mode";        Name = "Tools.DeveloperMode.Core~~~~0.0.1.0";         Type = 'Capability' }
-            'WinOcr'         = @{ Label = "Windows OCR";           Name = "Microsoft.Windows.WinOcr~~~~0.0.1.0";        Type = 'Capability' }
+            'PowerShell-ISE' = @{ Label = "PowerShell ISE"; Name = "Microsoft.Windows.PowerShell.ISE~~~~0.0.1.0"; Type = 'Capability' }
+            'SnippingTool'   = @{ Label = "Snipping Tool"; Name = "Microsoft.Windows.SnippingTool~~~~0.0.1.0"; Type = 'Capability' }
+            'VBSCRIPT'       = @{ Label = "VBScript"; Name = "VBSCRIPT~~~~"; Type = 'Capability' }
+            'Notepad'        = @{ Label = "Notepad"; Name = "Microsoft.Windows.Notepad~~~~0.0.1.0"; Type = 'Capability' }
+            'DeveloperMode'  = @{ Label = "Developer Mode"; Name = "Tools.DeveloperMode.Core~~~~0.0.1.0"; Type = 'Capability' }
+            'WinOcr'         = @{ Label = "Windows OCR"; Name = "Microsoft.Windows.WinOcr~~~~0.0.1.0"; Type = 'Capability' }
 
             # --- Package-based FoDs (Add-WindowsPackage) ---
             # The 'Name' here is a wildcard pattern to find the .cab in the source folder.
-            'Ethernet'       = @{ Label = "Ethernet drivers";      Name = "Microsoft-Windows-Ethernet-Client-*-FOD-Package-*.cab"; Type = 'Package' }
-            'Wifi'           = @{ Label = "Wi-Fi drivers";         Name = "Microsoft-Windows-Wifi-Client-*-FOD-Package-*.cab";     Type = 'Package' }
+            'Ethernet'       = @{ Label = "Ethernet drivers"; Name = "Microsoft-Windows-Ethernet-Client-*-FOD-Package-*.cab"; Type = 'Package' }
+            'Wifi'           = @{ Label = "Wi-Fi drivers"; Name = "Microsoft-Windows-Wifi-Client-*-FOD-Package-*.cab"; Type = 'Package' }
         }
         $fodKeys = $FoDList.Split(',') | ForEach-Object { $_.Trim() } | Where-Object { $_ -ne "" }
         foreach ($key in $fodKeys) {
             # Resolve: catalog hit | raw capability name (with ~) | short name (append ~~~~)
             $fodInfo = $null
             $capName = $null
-            $label   = $null
-            $type    = 'Capability'   # default for raw capability names
+            $label = $null
+            $type = 'Capability'   # default for raw capability names
 
             if ($FoDCatalog.ContainsKey($key)) {
                 $fodInfo = $FoDCatalog[$key]
                 $capName = $fodInfo.Name
-                $label   = $fodInfo.Label
-                $type    = $fodInfo.Type
-            } elseif ($key -match "~") {
+                $label = $fodInfo.Label
+                $type = $fodInfo.Type
+            }
+            elseif ($key -match "~") {
                 $capName = $key
-                $label   = $key
-            } else {
+                $label = $key
+            }
+            else {
                 $capName = "$key~~~~"
-                $label   = "$key (capability $capName)"
+                $label = "$key (capability $capName)"
             }
 
             Write-Host "  >> $label" -ForegroundColor White
@@ -1790,33 +2008,39 @@ try {
                         Add-WindowsPackage -PackagePath $cabFile.FullName -Path $mountDir -ScratchDirectory $scratchDir | Out-Null
                         Write-OK "$label installed: $($cabFile.Name)"
                         Write-Log "FoD Package OK: $label ($($cabFile.Name))"
-                    } catch {
+                    }
+                    catch {
                         $err = $_.Exception.Message
                         if ($err -match "0x800f081e") {
                             Write-Info "$($cabFile.Name) not applicable - skipping"
                             Write-Log "FoD $($cabFile.Name) skipped - not applicable (0x800f081e)" "INFO"
-                        } else {
+                        }
+                        else {
                             Write-Warn "$($cabFile.Name) failed: $err"
                             Write-Log "WARN FoD $($cabFile.Name): $err" "WARN"
                         }
                     }
                 }
-            } else {
+            }
+            else {
                 # Capability-based FoD (PowerShell-ISE, Notepad, VBSCRIPT, WinOcr,
                 # DeveloperMode, SnippingTool, NetFX3, and any raw capability name).
                 try {
                     Add-WindowsCapability -Name $capName -Path $mountDir -Source $LPSearchRoot -ScratchDirectory $scratchDir | Out-Null
                     Write-OK "$label enabled"
                     Write-Log "FoD OK: $label ($capName)"
-                } catch {
+                }
+                catch {
                     $err = $_.Exception.Message
                     if ($err -match "0x800f081e") {
                         Write-Info "$label already present - skipping"
                         Write-Log "FoD $label skipped - already present (0x800f081e)" "INFO"
-                    } elseif ($err -match "0x800f0805") {
+                    }
+                    elseif ($err -match "0x800f0805") {
                         Write-Warn "$label unknown on this image - skipping"
                         Write-Log "WARN FoD $label`: capability not found ($capName)" "WARN"
-                    } else {
+                    }
+                    else {
                         Write-Warn "$label failed: $err"
                         Write-Log "WARN FoD $label`: $err" "WARN"
                     }
@@ -1839,10 +2063,12 @@ try {
         $dismResult = & dism.exe /Image:$mountDir /Add-Package /PackagePath:$lcuTempTarget2 /ScratchDir:$scratchDir 2>&1
         if ($LASTEXITCODE -eq 0) {
             Write-OK "Full LCU installed (pass 2)"; Write-Log "LCU pass 2 OK: $($lcuFile.Name)"
-        } elseif ($LASTEXITCODE -eq -2146498530) {
+        }
+        elseif ($LASTEXITCODE -eq -2146498530) {
             Write-Warn "LCU pass 2 not applicable (0x800f081e) - skipping"
             Write-Log "WARN 0x800f081e LCU pass 2" "WARN"
-        } else {
+        }
+        else {
             $errMsg = ($dismResult | Where-Object { $_ -match "Error" }) -join " "
             Remove-Item $lcuTempDir2 -Recurse -Force -ErrorAction SilentlyContinue
             if ($LASTEXITCODE -eq -2146498504) {
@@ -1861,15 +2087,18 @@ try {
     if ($DebugBuild) {
         $cleanupResult = & dism.exe /Image:$mountDir /Cleanup-Image /StartComponentCleanup /ScratchDir:$scratchDir 2>&1
         $cleanupResult | ForEach-Object { Write-Host "    $_" -ForegroundColor Magenta; Write-Log "[DEBUG] $_" }
-    } else {
+    }
+    else {
         $cleanupResult = & dism.exe /Image:$mountDir /Cleanup-Image /StartComponentCleanup /ScratchDir:$scratchDir 2>&1
     }
     if ($LASTEXITCODE -eq 0) {
         Write-OK "Component cleanup complete"; Write-Log "Component cleanup OK"
-    } elseif ($LASTEXITCODE -eq -2146498554) {
+    }
+    elseif ($LASTEXITCODE -eq -2146498554) {
         Write-Warn "Cleanup: pending operations (0x800F0806) - image must boot to complete. Non-fatal, continuing."
         Write-Log "WARN: Component cleanup 0x800F0806 (pending ops)" "WARN"
-    } else {
+    }
+    else {
         Write-Warn "Component cleanup returned exit code $LASTEXITCODE (non-fatal, continuing)"
         Write-Log "WARN: Component cleanup exit $LASTEXITCODE" "WARN"
     }
@@ -1882,12 +2111,14 @@ try {
             try {
                 Add-WindowsPackage -PackagePath $upd.FullName -Path $mountDir -IgnoreCheck -ScratchDirectory $scratchDir | Out-Null
                 Write-OK "Installed"; Write-Log ".NET OK: $($upd.Name)"
-            } catch {
+            }
+            catch {
                 $err = $_.Exception.Message
                 if ($err -match "0x800f081e") {
                     Write-Warn "Not applicable (0x800f081e) - skipping"
                     Write-Log "WARN 0x800f081e .NET" "WARN"
-                } else {
+                }
+                else {
                     Write-Warn "Failed: $err"; Write-Log "ERROR .NET: $err" "ERROR"
                 }
             }
@@ -1898,14 +2129,14 @@ try {
     if (-not $SkipAppxRemoval) {
         Write-Section "Removing Appx packages"
         $installed = @(Get-AppxProvisionedPackage -Path $mountDir)
-        $removed   = 0
-        $handled   = New-Object 'System.Collections.Generic.HashSet[string]'
+        $removed = 0
+        $handled = New-Object 'System.Collections.Generic.HashSet[string]'
 
         foreach ($appx in $AppxToRemove) {
-            $how  = 'exact'
+            $how = 'exact'
             $pkgs = @($installed | Where-Object { $_.DisplayName -eq $appx })
             if ($pkgs.Count -eq 0) {
-                $how  = 'substring'
+                $how = 'substring'
                 $pkgs = @($installed | Where-Object { $_.DisplayName -like "*$appx*" })
             }
             if ($pkgs.Count -eq 0) {
@@ -1930,7 +2161,8 @@ try {
                 Write-OK "Removed: $($pkg.DisplayName)"
                 Write-Log "Removed Appx: $($pkg.DisplayName) [$($pkg.PackageName)]"
                 $removed++
-            } catch {
+            }
+            catch {
                 Write-Warn "Failed to remove $($pkg.DisplayName): $($_.Exception.Message)"
                 Write-Log "WARN Remove-Appx failed $($pkg.DisplayName): $($_.Exception.Message)" "WARN"
             }
@@ -1946,7 +2178,8 @@ try {
         $ok = Install-DefenderKitToImage -Kit $script:DefenderKit -MountPath $mountDir
         $script:DefenderStatus = if ($ok) {
             "Applied (package $($script:DefenderKit.PackageVersion))"
-        } else {
+        }
+        else {
             "Not applied - install failed (rolled back)"
         }
     }
@@ -1966,7 +2199,8 @@ try {
     Write-OK "Exported: $OutputPath ($sizeGB GB)"
     Write-Log "Exported: $OutputPath ($sizeGB GB)"
 
-} catch {
+}
+catch {
     Write-Host ""
     Write-Fail "Servicing failed: $($_.Exception.Message)"
     Write-Log "ERROR: $($_.Exception.Message)" "ERROR"
@@ -1979,7 +2213,8 @@ try {
     if (Test-Path -LiteralPath $mountDir) {
         try { Dismount-WindowsImage -Path $mountDir -Discard -ErrorAction SilentlyContinue | Out-Null } catch {}
     }
-} catch {}
+}
+catch {}
 Remove-Item $workRoot -Recurse -Force -ErrorAction SilentlyContinue
 
 Write-Section "DONE"
