@@ -572,15 +572,6 @@ function Resolve-WimEsdFolder {
 }
 function Test-LPSourceComplete {
     # Validates that LPSearchRoot is a usable FOD/LP repository:
-    #   1. required metadata files in root + metadata\ (FATAL if missing)
-    #   2. per-required-locale: LP cab + LanguageFeatures-Basic + per-locale
-    #      CompDB + MINIMUM cab count (WARNING if under threshold)
-    # The minimum-count check catches the common "deleted one or two cabs"
-    # case that produces 0x80070002 at install time. A complete locale has
-    # ~43 cabs (LP + 4× LanguageFeatures + ~38 FoD satellites covering
-    # amd64/wow64, incl. HyperV VM platform and two WMIC packages).
-    # Locales already in the image (en-US) need nothing — DISM resolves
-    # them against installed components, not against the source repo.
     param(
         [Parameter(Mandatory)][string]$LPSourceRoot,
         [string[]]$RequiredLocales,
@@ -632,11 +623,10 @@ function Test-LPSourceComplete {
 
         foreach ($locale in @($RequiredLocales | Where-Object { $_ } | Select-Object -Unique)) {
             $lcLow = $locale.ToLower()
-            $lcRef = $locale   # metadata and FoD names use original case (ru-RU)
+            $lcRef = $locale
 
             # Locale-specific cabs: "~<locale>~" satellites, LanguageFeatures-<type>-<lc>,
-            # and the main Client-Language-Pack. Uses -match, so a stray leftover
-            # from another locale does NOT count toward this locale.
+            # and the main Client-Language-Pack.
             $localeCabs = @($allCabs | Where-Object {
                 $_.Name -match "~$([regex]::Escape($lcRef))~" -or
                 $_.Name -match "LanguageFeatures-[^-]+-$([regex]::Escape($lcLow))-Package" -or
