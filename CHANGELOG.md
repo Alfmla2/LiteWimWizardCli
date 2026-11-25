@@ -1,4 +1,27 @@
-﻿7.0.2
+﻿7.0.5
+    Fix: output WIM was not renamed to reflect post-servicing version when
+    the auto-generated filename contained a _<langs>_ segment (full builds
+    from 6.3.0 onward, e.g. Win11_24H2_26100.1742_ru_20261126.wim stayed
+    at 1742 after LCU 9974 was applied). The guard regex
+    '_\d+\.\d+_\d{8}\.wim$' only matched the older patch-mode name shape
+    without _<langs>_, so the rename block was silently skipped. Guard
+    removed: -replace '_\d+\.\d+_' is idempotent and matches the build
+    token wherever it appears, so the rename now triggers purely on
+    "did the filename change". Unparseable Version and missing-token cases
+    now emit Write-Warn + Write-Log instead of failing silently.
+7.0.4
+    Fix: Write-Log was only defined just before the main try block, but
+    Invoke-UpdateFolderCleanup (Step 3) called it whenever it removed any
+    stale file from the Updates folder — producing CommandNotFoundException
+    on runs that had leftover .msu files from a previous build.
+    $script:logFile is now set to $null near the top of the script and
+    Write-Log is defined there too (no-op until $script:logFile is assigned
+    in Step 5). Step 5 now just sets $script:logFile, no longer redefines
+    the function.
+    Cleanup: removed unused $wimFilePathWasExplicit and $langPathWasExplicit
+    (the WIM-file and LP-folder decisions are made from the parameters
+    directly, not from these flags).
+7.0.2
 	Interactive-mode fixes:
 	- Prompts for -LanguagesAndOptionalFeaturesPath when the folder
 	  isn't at the default location and LP/FoD injection is requested.

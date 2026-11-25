@@ -112,7 +112,7 @@ param(
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
-$ScriptVersion = "7.0.3"
+$ScriptVersion = "7.0.5"
 $MinFreeSpaceGB = 30
 
 if ($WimEsdPath -eq '/?') { $Help = $true; $WimEsdPath = "" }
@@ -149,8 +149,6 @@ $ScriptRoot = $PSScriptRoot
 if (-not $ScriptRoot) { $ScriptRoot = Split-Path -Parent $MyInvocation.MyCommand.Path }
 # Remember whether caller explicitly passed paths — controls whether we prompt
 $outputPathWasExplicit =  [bool]$OutputPath
-$langPathWasExplicit   =  [bool]$LanguagesAndOptionalFeaturesPath
-$wimFilePathWasExplicit = [bool]$WimFilePath
 $workPathWasExplicit   =  [bool]$WorkPath
 
 if (-not $WimEsdPath) { $WimEsdPath = "$ScriptRoot\WimEsd" }
@@ -179,7 +177,16 @@ function Write-Warn { param([string]$msg) Write-Host "  [!]   $msg" -ForegroundC
 function Write-Info { param([string]$msg) Write-Host "  [i]   $msg" -ForegroundColor Cyan }
 function Write-Fail { param([string]$msg) Write-Host "  [ERR] $msg" -ForegroundColor Red }
 function Write-DiskWarn { param([string]$msg) Write-Host "  [!]   $msg" -ForegroundColor DarkYellow }
-
+# ── Logging ──────────────────────────────────────────────────────────────────
+# $script:logFile is set later (Step 5), once $outputDir exists. Before that,
+# Write-Log is a no-op — Callers in Step 3 (Invoke-UpdateFolderCleanup) can
+# safely call it without "command not found".
+$script:logFile = $null
+function Write-Log {
+    param([string]$msg, [string]$level = "INFO")
+    if (-not $script:logFile) { return }
+    [System.IO.File]::AppendAllText($script:logFile, ("[{0}] [{1}] {2}`r`n" -f (Get-Date -Format "yyyy-MM-dd HH:mm:ss"), $level, $msg))
+}
 # ── Disk space helpers ───────────────────────────────────────────────────────
 function Get-FreeSpaceGB {
     param([string]$Path)
@@ -1433,14 +1440,10 @@ $mountDir = Join-Path $workRoot "Mount"
 $workWim = Join-Path $workRoot "install_work.wim"
 $scratchDir = Join-Path $workRoot "Scratch"
 $logFile = Join-Path $outputDir ("WIMServicing_{0}.log" -f (Get-Date -Format "yyyyMMdd_HHmm"))
+$script:logFile = $logFile
 
 @($workRoot, $mountDir, $scratchDir) | ForEach-Object {
     if (-not (Test-Path $_)) { New-Item $_ -ItemType Directory -Force | Out-Null }
-}
-
-function Write-Log {
-    param([string]$msg, [string]$level = "INFO")
-    [System.IO.File]::AppendAllText($logFile, ("[{0}] [{1}] {2}`r`n" -f (Get-Date -Format "yyyy-MM-dd HH:mm:ss"), $level, $msg))
 }
 
 Write-Log "=== WIM Wizard v$ScriptVersion ==="
@@ -2200,8 +2203,9 @@ try {
                 if ($finalBuild -ne $_buildStr) {
                     $curName = [System.IO.Path]::GetFileName($OutputPath)
                     $curDir  = Split-Path $OutputPath -Parent
-                    if ($curName -match '_\d+\.\d+_\d{8}\.wim$') {
-                        $newName = $curName -replace '_\d+\.\d+_', "_${finalBuild}_"
+                    # Replace the build token anywhere in "_<build>_" form.
+                    $newName = $curName -replace '_\d+\.\d+_', "_${finalBuild}_"
+                    if ($newName -ne $curName) {
                         $newPath = Join-Path $curDir $newName
                         if (-not (Test-Path -LiteralPath $newPath)) {
                             Move-Item -LiteralPath $OutputPath -Destination $newPath -Force
@@ -2211,8 +2215,14 @@ try {
                         } else {
                             Write-Warn "Cannot rename: $newName already exists - keeping $curName"
                         }
+                    } else {
+                        Write-Warn "Version changed ($_buildStr -> $finalBuild) but no build token found in: $curName"
+                        Write-Log "WARN: no build token in filename, skipping rename: $curName" "WARN"
                     }
                 }
+            } else {
+                Write-Warn "Could not parse post-servicing version: $($finalInfo.Version)"
+                Write-Log "WARN: unparseable Version '$($finalInfo.Version)' - skipping rename" "WARN"
             }
         } catch {
             Write-Warn "Could not verify final version: $($_.Exception.Message)"
