@@ -1,210 +1,303 @@
-# WimWizard
+# WimWizard (home-user fork)
 
-**WimWizard** is a PowerShell-based Windows 11 WIM image servicing tool developed for enterprise IT environments. It automates the monthly process of building and maintaining deployment-ready WIM images — injecting language packs, removing unwanted built-in apps, and applying the latest Patch Tuesday updates — all in a single automated run.
-
-A graphical launcher (`WimWizard-GUI.ps1`) provides a clean interface for configuring and launching the tool without touching the command line.
+Personal fork of [WimWizard](https://github.com/TacII/WimWizard) by Mathias Haas,
+retargeted for home lab / single-machine Windows 11 image servicing rather than
+enterprise fleet management. The enterprise-only pieces (SCCM/MECM, ARM64,
+SafeOS/WinRE patching, GUI integration) are removed, and the workflow switched
+from ISO mounting to plain folders containing `install.wim`/`install.esd` plus
+an extracted `LanguagesAndOptionalFeatures` directory.
 
 Inspired by [WIM Witch](https://msendpointmgr.com/wim-witch/) by Donna Ryan.
+Original license: **GNU GPL v3.0** (inherited).
 
-## Features
-
-- **Full image build** — Services a Windows 11 Enterprise WIM from a source ISO: language packs, FOD packages, cumulative updates (.NET, SafeOS/WinRE), and Appx removal
-- **SCCM/MECM integration** — Automatically imports the finished WIM into SCCM as an OS Image package after a successful build. Supports creating new packages or updating an existing one by Package ID. Full CLI parameter support for scheduled tasks
-- **Staged distribution point rollout** — Optional Distribution Point Group dropdown (SCCM tab) adds the package to a DP group via `Start-CMContentDistribution`, independent of the "Update DPs" checkbox — stage a build to one test DP first, then roll out to a full group once validated. Applies to Manual Import, auto-import-after-build, and the Patch WIM → SCCM flow. A source-stability check guards against DFS-R replication lag right after a build so distribution isn't kicked off against a not-yet-replicated file
-- **Image edition selector** — Options tab lets you pick a non-Enterprise edition (Pro, Education, etc.) from the source ISO's index list and passes it through automatically via `-WimIndex`
-- **Microsoft-documented servicing sequence** — WinRE is patched before `install.wim`; LCU is applied twice (pass 1 SSU, pass 2 full) around language pack injection, following [Microsoft's media dynamic update sequence](https://learn.microsoft.com/en-us/windows/deployment/update/media-dynamic-update)
-- **Inbox app language fix** — Automatically generates and injects a RunOnce script into the Default User profile that reinstalls kept apps via winget at first user logon. This triggers the AppX framework to download the correct language satellites for the user's locale — no task sequence steps required
-- **Patch mode** — Patches an existing serviced WIM with the latest updates only, skipping ISO/LP steps. Ideal for monthly Patch Tuesday cycles
-- **GUI Patch WIM tab** — Patch an existing WIM directly from the GUI without rebuilding from ISO. Supports both SCCM-sourced WIMs (fetched by Package ID) and local WIM files. Handles the full SCCM round-trip: fetch → patch → copy back → update package → update DPs
-- **Automatic update download** — Downloads LCU, .NET and SafeOS updates directly from the Microsoft Update Catalog via [MSCatalogLTS](https://www.powershellgallery.com/packages/MSCatalogLTS/1.0.5). Already-downloaded KBs are reused automatically. LCU is downloaded via DownloadDialog API to preserve the original filename (including SHA1 hash) required by DISM
-- **Language pack injection** — Supports all 39 languages available in the Microsoft LP ISO, including LIPs and FOD packages. Language FODs are injected via `Add-WindowsCapability` with capability names
-- **Features on Demand** — Optional injection of .NET Framework 3.5, OpenSSH Server, RSAT tools, WordPad, and Windows Media Player. Configurable via GUI or `-FoDList` parameter
-- **Appx removal** — 36 configurable inbox apps with sensible corporate defaults. Fully configurable via GUI
-- **ARM64 support** — Builds ARM64 images from the ARM64 Windows ISO and ARM64 Language Pack ISO. All four ISOs (x64 + ARM64, Windows + LP) can coexist in `ISO-Source\`; the correct pair is selected automatically
-- **WinRE patching** — Applies SSU + SafeOS updates to WinRE following the Microsoft documented sequence, with `/ResetBase` cleanup isolated to WinRE only
-- **ISO validation** — GUI shows live ✔/✗ indicators for Windows ISO and Language Pack ISO. Run button hidden until prerequisites are met
-- **Registry persistence** — GUI saves all selections (languages, apps, options) to the registry and restores them on next launch
-- **Completion screen** — GUI minimizes while the build runs, restores and shows a completion screen when done
-- **ISO version probe** — GUI reads the Windows ISO at startup (from filename or by mounting) to display the real build number in the filename preview
-- **26H2 support** - Wim Wizard supports Windows 26H2, tested! 
-- **Driver injection** - GUI lets you browse and select drivers to inject into your ISO. Folders can be selected with parameter as well.
-- **Defender update** - Wim Wizard automatically downnloads and updates Windows Defender to the latest version.
-- **Reads built in apps from ISO** Automatically reads built in applications from ISO so that they can be removed or left in the image
 ---
+
+## What this fork changes vs upstream
+
+| Aspect | Upstream (5.8.1) | This fork (7.0.5) |
+| --- | --- | --- |
+| Input | Windows ISO + LP ISO files | Extracted folders: `install.wim`/`install.esd` + `LanguagesAndOptionalFeatures\` |
+| GUI | `WimWizard-GUI.ps1` (Windows Forms) | None — CLI only, driven by parameters + `help.txt` |
+| Scope | Enterprise (SCCM, fleet, x64+ARM64) | Home / single-machine (x64 only) |
+| Patch mode | `-PatchExistingWim` parameter | Place WIM as `install.wim` + `-SkipLanguagePacks -SkipAppxRemoval -SkipDefenderUpdate` |
+| FoD catalog | Corporate (`NetFx3`, `RsatAD`, …) | Home (`PowerShell-ISE`, `SnippingTool`, `VBSCRIPT`, `WinOcr`, `DeveloperMode`, `Ethernet`, `Wifi`, `Notepad`) + raw capability names |
+| Output name | Version from source ISO | Post-servicing version (read from exported WIM after LCU) |
+| LP validation | None | `Test-LPSourceComplete` pre-flight — catches `0x80070002` before mount |
+| Checkpoint KB5043080 | Required for WinRE + install.wim | Required only for install.wim (post-LP/FoD baseline restoration) |
+
+## What this fork removes
+
+| Removed | Reason |
+| --- | --- |
+| `-SCCMImport` and all `-SCCM*` parameters | No SCCM in scope |
+| `-ARM64`, `-X64`, ARM64 filters, ARM64 ISOs | x64 only |
+| SafeOS Dynamic Update download/apply | WinRE not patched |
+| WinRE (`winre.wim`) mount / patch / commit | WinRE updates handled online at first boot |
+| `-SkipInboxAppLanguageFix` and winget RunOnce fix | `winget --source msstore` reinstall failed in practice |
+| ISO mounting (`Mount-DiskImage`, `Dismount-AllISOs`) | Folder-based workflow |
+| `-PatchExistingWim` | Replaced by Skip-flag combination |
+| GUI hooks (`WimWizard-GUI.ps1` parameter hand-off) | CLI only |
+
+## Features (current)
+
+- **Language packs** — main LP cab + `Language.*` FoDs via `Add-WindowsCapability`
+- **Features on Demand** — catalog of home-user FoDs + raw capability names
+- **Driver injection** — recursive INF scan or curated XML list, per-driver try/catch
+- **Appx removal** — built-in default list (26 packages) or custom XML, exact-match preferred
+- **Offline Defender update** — KB4568292 platform/engine/definitions, cached, signed-cab validated
+- **Automatic update download** — LCU + **checkpoint KB5043080** + .NET CU via MSCatalogLTS;
+  hash-preserving filenames (DISM signature validation)
+- **Two-pass LCU** — SSU (pass 1) → LP/FoD → full LCU (pass 2). Checkpoint is copied alongside LCU
+  in both passes so DISM restores the baseline after LP/FoD invalidation
+- **Component store cleanup** — `/StartComponentCleanup` (no `/ResetBase` on main OS)
+- **LP repository pre-flight** — required metadata cabs + ≥ 43 locale-specific cabs per language
+- **Post-servicing rename** — auto-generated output filename gets the build number from
+  `Get-WindowsImage .Version` after export (e.g. `26100.1742` → `26100.9974`)
+- **x64 only**, Windows 11 24H2 / 25H2 / 26H2
 
 ## Requirements
 
-- Windows PowerShell 5.1 or later
-- Windows 11 Enterprise or Education source ISO (24H2 or later) — x64 and/or ARM64
-- Windows 11 Language Pack ISO to add languages (contains all LP + FOD packages — no separate FOD ISO needed) — x64 and/or ARM64
-- Administrator rights — both scripts must be launched as Admin (mount commands require elevation)
-- Internet access for automatic update download (or provide updates manually via `-UpdatePath`)
-- [MSCatalogLTS](https://www.powershellgallery.com/packages/MSCatalogLTS/1.0.5) PowerShell module (installed automatically if missing)
+- **Windows PowerShell 5.1+** or **PowerShell 7.x**
+- **Administrator rights** — DISM mount/commit require elevation
+- **Windows 11 source WIM/ESD** — `install.wim` or `install.esd`, Enterprise/Pro/Education, x64, 24H2 or later
+- **LanguagesAndOptionalFeatures folder** — extracted from the matching LP ISO, metadata + per-locale cabs intact
+- **Internet access** for auto-download, or `-UpdatePath` pointing to pre-downloaded `.msu`/`.cab`
+- **MSCatalogLTS** PowerShell module (installed from PSGallery automatically if missing)
 
-> **Host OS note:** As of 5.1.0, building on a fully patched **Windows 11 25H2** host is fully supported. Windows Server 2022 continues to work without restrictions.
-
-> **26H2 note:** Build-number detection for Windows 11 26H2 (26300.x+) is in place, but has only been confirmed against an Insider/Experimental build, not yet against a public/Enterprise GA ISO.
-
----
+> **Defender Realtime Scanning:** add the output and work folders to the Defender
+> exclusion list, otherwise DISM LCU-patching will most likely fail.
 
 ## Files
 
-| File                               | Description                                                                                                                           |
-| ----------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------- |
-| `WimWizard.ps1`                    | Main servicing script — run directly or via the GUI                                                                                   |
-| `WimWizard-GUI.ps1`                | Graphical launcher — recommended entry point                                                                                          |
-| `WimWizard-AppxList.xml`           | Generated by the GUI on Run — custom Appx removal list                                                                                |
-| `WimWizard-DefenderExclusions.ps1` | Script to exclude Dism.exe, Dismhost.exe, wusa.exe, wimserv.exe processes and WimWizard output paths from Defender Realtime scanning. |
-| `ISO-Source\`                      | Place your Windows ISO and Language Pack ISO here                                                                                     |
-| `Updates\`                         | Cached update files — reused automatically on subsequent runs                                                                         |
-| `Output\`                          | Default output folder for finished WIM files and build logs                                                                           |
-| `SetLanguage.zip`                  | Task sequence steps to set default language for the nordic languages based on input from TSGui or UDI-Wizard                          |
+| File | Description |
+| --- | --- |
+| `WimWizard.ps1` | Main servicing script |
+| `help.txt` | Companion file — text shown by `-Help` / `/?` |
+| `CHANGELOG.md` | Full version history |
+| `README.md` | This file |
+| `WimWizard-AppxList.xml` | Optional custom Appx removal list (`-AppxListPath`) |
+| `WimWizard-DriverList.xml` | Optional curated driver INF list (`-DriverListPath`) |
 
----
+Default folder layout (created on demand):
+<ScriptRoot>
+├── WimEsd\ # install.wim / install.esd
+├── LanguagesAndOptionalFeatures\ # LP + FoD cabs + metadata
+│ └── metadata
+├── Updates\ # cached updates (auto-created)
+│ └── DefenderKit
+└── Output\ # finished WIM + logs (auto-created)
 
-## Getting Started
+## Getting started
 
-1. Clone or download this repository to a folder on your servicing machine, e.g. `D:\WimWizard\`
+1. Download the **Windows 11** and **Language Pack** ISOs from the
+   [Microsoft 365 Admin Center](https://admin.microsoft.com/adminportal/home#/subscriptions/vlnew/downloadsandkeys).
 
-2. Download the following from the [Microsoft 365 Admin Center](https://admin.microsoft.com/adminportal/home#/subscriptions/vlnew/downloadsandkeys):
+2. **Extract** both ISOs:
+Windows ISO → <ScriptRoot>\WimEsd\ (sources\install.wim → install.wim)
+LP ISO → <ScriptRoot>\LanguagesAndOptionalFeatures
+(preserve the metadata\ subfolder and every .cab file)
 
-   - Windows 11 Enterprise ISO (`SW_DVD9_Win_Pro_11_25H2_*.ISO`)
-   - Language Pack ISO (`SW_DVD9_Win_11_*_LangPack_*.ISO`)
+3. Launch `WimWizard.ps1` **as Administrator**.
 
-3. Place both ISOs in the `ISO-Source\` folder next to the scripts
+4. Interactive mode prompts for language, output path, work folder, and (if
+needed) the LP folder. Unattended mode takes everything via CLI.
 
-4. Right-click `WimWizard-GUI.ps1` → **Run As Admin**
-   *(or launch from an elevated PowerShell session)*
+## The LanguagesAndOptionalFeatures folder
 
-5. Select your languages, configure app removal, click **Run**
+This folder is **not optional** for localized builds, and its contents must be
+preserved. Removing locale-specific `.cab` files that DISM expects at install
+time causes `0x80070002` on the main LP install — DISM resolves satellite
+packages per-locale, not just for the locale being installed.
 
-6. Import the finished WIM into SCCM/MECM:
-   `Software Library → Operating System Images → right-click → Update Distribution Points`
+**Root — required metadata:**
+- `FoDMetadata_Client.cab`
+- `Microsoft-Windows-FodMetadataServicing-Desktop-Metadata-Package.cab`
+- `Microsoft-Windows-FodMetadataServicing-Desktop-CompDB-Package.cab`
 
-7. Exclude `<driveletter>\WimWizard\Output\` from Microsoft Defender real-time scanning — otherwise DISM LCU-patching will most likely fail.
+**`metadata\` — required:**
+- `DesktopTargetCompDB_Neutral.xml.cab`
+- `DesktopTargetCompDB_FOD_Neutral.xml.cab`
+- `DesktopTargetCompDB_FOD_Metadata_Neutral.xml.cab`
+- `DesktopTargetCompDB_Conditions.xml.cab`
 
----
+**Per language in `-Languages` (43 cabs minimum each):**
+- `Microsoft-Windows-Client-Language-Pack_x64_<lc>.cab`
+- `Microsoft-Windows-LanguageFeatures-Basic-<lc>-Package~*.cab`
+- `Microsoft-Windows-LanguageFeatures-{OCR,Handwriting,TextToSpeech,Speech}-<lc>-Package~*.cab`
+(whichever exist in the ISO)
+- ~38 additional `~<locale>~` FoD satellite cabs (PowerShell-ISE, Notepad,
+WinOcr, WMIC, HyperV VM platform, etc.)
+- `metadata\DesktopTargetCompDBForISO_<locale>.xml.cab`
+- `metadata\DesktopTargetCompDBForISO_FOD_<locale>.xml.cab`
 
-## Inbox App Language Fix
+**Locales already in the source image** (typically `en-US`) do **not** need
+cabs here — DISM resolves them against installed components.
 
-Windows 11 Store-managed inbox apps (Notepad, Calculator, Paint, Photos, Snipping Tool etc.) display in English at first user logon even when language packs are correctly injected into the WIM. This happens because their UI language comes from a **language satellite MSIX** downloaded by the Store framework at install time — not from OS FODs.
+The `Test-LPSourceComplete` pre-flight in Step 2 checks the layout and warns
+(with per-locale cab counts in green / yellow / red) before mounting.
 
-WIM Wizard fixes this automatically during the image build:
+## Language packs
 
-1. After Appx removal, generates `InstallSystemApps.ps1` with `winget` reinstall commands for all apps that were **kept** in the image (not in the removal list)
-2. Copies the script into the WIM at `C:\ProgramData\WimWizard\`
-3. Injects a `RunOnce` registry key into `Users\Default\NTUSER.DAT` so the script runs at **every new user's first logon**
-4. At first logon, the script bootstraps the latest `winget` from GitHub, then reinstalls each kept app — the AppX framework automatically downloads the correct language satellites for the user's configured locale
+Any 2-letter code from the supported list works:
+ar bg cs da de dk el en es et fi fr gb gr he hr hu il it ja jp ko kr lt lv
+mx nl no pl pt ro ru se sk sl sr sv th tr tw hk ua uk us vn zh cn ca eu gl id vi
 
-No task sequence modifications needed. The fix is baked into the WIM.
+- `-Unattended` without `-Languages` → English-only build (no LP injection).
+- Interactive mode prompts with default `ru`.
+- Unrecognized codes fail immediately with the supported list.
 
----
+Supported languages beyond `ru` work with the same mechanism — just include
+the per-locale cabs for that language in `LanguagesAndOptionalFeatures` and
+pass the code in `-Languages`.
 
-## Monthly Patching
+## Features on Demand
 
-Once you have a baseline image, use patch mode instead of rebuilding from scratch:
+`-FoDList` accepts comma-separated short keys or raw DISM capability names:
 
-**Via GUI:**
+| Short key | Capability / package | Method |
+| --- | --- | --- |
+| `PowerShell-ISE` | `Microsoft.Windows.PowerShell.ISE~~~~0.0.1.0` | Add-WindowsCapability |
+| `SnippingTool` | `Microsoft.Windows.SnippingTool~~~~0.0.1.0` | Add-WindowsCapability |
+| `VBSCRIPT` | `VBSCRIPT~~~~` | Add-WindowsCapability |
+| `WinOcr` | `Microsoft.Windows.WinOcr~~~~0.0.1.0` | Add-WindowsCapability |
+| `DeveloperMode` | `Tools.DeveloperMode.Core~~~~0.0.1.0` | Add-WindowsCapability |
+| `Notepad` | `Microsoft.Windows.Notepad~~~~0.0.1.0` | Add-WindowsCapability |
+| `Ethernet` | `Microsoft-Windows-Ethernet-Client-*-FOD-Package-*.cab` | Add-WindowsPackage |
+| `Wifi` | `Microsoft-Windows-Wifi-Client-*-FOD-Package-*.cab` | Add-WindowsPackage |
 
-1. Options tab → check **Patch an existing image**
-2. Browse to your last built WIM
-3. Languages are read automatically from the WIM
-4. Click Run — only updates are downloaded and applied
+Any other value is treated as a DISM capability name:
+- Contains `~` → used verbatim (e.g. `Microsoft.Windows.Foo~~~~0.0.1.0`)
+- No `~` → `~~~~` appended (e.g. `NetFX3` → `NetFX3~~~~`)
 
-**Standalone:**
+The `.cab` wildcard packages are installed individually per matching file
+(e.g. both Intel and Realtek Wi-Fi drivers, if present in the folder).
 
-```
-.\WimWizard.ps1 -PatchExistingWim "Output\Win11_25H2_26200.8037_da_fi_no_se_20260310.wim"
-```
+## Update-only mode (monthly patching)
 
----
+To apply only the latest LCU + checkpoint + .NET CU to an existing serviced WIM:
 
-## Standalone Usage
+1. Place the WIM as `install.wim` in `-WimEsdPath`, **or** point `-WimFilePath`
+   directly at the file.
+2. Run with three Skip flags to disable LP/FoD/Appx/Defender phases:
+.\WimWizard.ps1 -WimFilePath "D:\Custom\my-image.wim" -WorkPath "W:\work" -UpdatePath "C:\Updates"
+-SkipLanguagePacks -SkipAppxRemoval -SkipDefenderUpdate -Unattended
 
-```
-# Interactive
+The output filename gets the post-servicing build number, e.g.
+`Win11_24H2_26100.1742_ru_20261126.wim` → `Win11_24H2_26100.9974_ru_20261126.wim`.
+User-supplied output filenames (`-OutputPath` with `.wim` extension) are **never**
+renamed.
+
+## Standalone usage examples
+Interactive build
 .\WimWizard.ps1
 
-# Unattended with 4 Nordic languages
-.\WimWizard.ps1 -Languages "da,fi,no,se" -Unattended
+Unattended Russian build
+.\WimWizard.ps1 -Languages "ru" -Unattended
 
-# ARM64 build
-.\WimWizard.ps1 -Languages "da,fi,no,se" -ARM64 -Unattended
+Unattended Russian build with FoDs
+.\WimWizard.ps1 -Languages "ru" -FoDList "PowerShell-ISE,Wifi" -Unattended
 
-# Custom source folder and output path
-.\WimWizard.ps1 -Languages "da,fi,no,se" -SourceFolder "E:\ISO" -OutputPath "D:\Output\Win11.wim" -Unattended
+Full build with explicit paths
+.\WimWizard.ps1 -Languages "ru" -WimEsdPath "D:\WimEsd"
+-LanguagesAndOptionalFeaturesPath "D:\LanguagesAndOptionalFeatures" -OutputPath "W:\out" -WorkPath "W:\work"
+-Unattended
 
-# Skip updates (language packs and app removal only)
-.\WimWizard.ps1 -Languages "da,fi,no,se" -SkipUpdates -Unattended
+With driver injection
+.\WimWizard.ps1 -Languages "ru" -DriverPath "\dfs\Drivers\Laptop" -Unattended
 
-# With custom Appx list generated by the GUI
-.\WimWizard.ps1 -Languages "da,fi,no,se" -AppxListPath "WimWizard-AppxList.xml" -Unattended
+Offline build with pre-downloaded updates
+.\WimWizard.ps1 -Languages "ru" -UpdatePath "C:\Updates" -Unattended
 
-# With Features on Demand
-.\WimWizard.ps1 -Languages "da,fi,no,se" -FoDList "NetFx3,RsatAD" -Unattended
+Update-only build
+.\WimWizard.ps1 -WimFilePath "D:\Custom\my-image.wim" `
+-SkipLanguagePacks -SkipAppxRemoval -SkipDefenderUpdate -Unattended
 
-# Show all parameters
+Show help (reads help.txt)
 .\WimWizard.ps1 -Help
-```
 
-Update download time varies. Already-downloaded KBs are reused from the `Updates\` cache automatically.
-
----
+First-time update download is 10–20 min (LCU alone is 500–800 MB). Already-cached
+KBs in `Updates\` are reused by KB number and hash.
 
 ## Parameters
 
 | Parameter | Description |
 | --- | --- |
-| `-SourceFolder` | Folder containing ISOs. Default: `<ScriptRoot>\ISO-Source` |
-| `-WindowsISOPath` | Explicit path to a specific Windows OS ISO, bypassing auto-detection in `-SourceFolder`. Only needed when the folder contains more than one candidate Windows ISO for the target architecture (WimWizard-GUI.ps1 sets this automatically after the user disambiguates via its picker). The Language Pack ISO is still auto-detected |
-| `-Languages` | Comma-separated country codes: `da,fi,no,se`. Interactive prompt if omitted |
-| `-OutputPath` | Full path for finished WIM. Auto-generated from build/languages/date if omitted |
-| `-AppxListPath` | XML with custom Appx removal list (generated by GUI) |
-| `-FoDList` | Comma-separated FoD keys to inject, e.g. `NetFx3,RsatAD,OpenSSH` |
-| `-DriverPath` | Root folder to recurse for driver `.inf` packages to inject. Full build only — ignored in patch mode |
-| `-DriverListPath` | XML of pre-selected driver INF paths (generated by GUI). Takes precedence over `-DriverPath` when both are given and it loads successfully |
-| `-PatchExistingWim` | Path to existing WIM to patch (updates only — skips LP/Appx) |
-| `-UpdatePath` | Manual override for update files folder |
-| `-WimIndex` | Force a specific WIM index. Default: `0` (auto-detect Enterprise) |
-| `-X64` | Build x64 image (default) |
-| `-ARM64` | Build ARM64 image |
-| `-SkipUpdates` | Skip downloading and applying updates |
-| `-SkipLanguagePacks` | Skip language pack injection |
-| `-SkipAppxRemoval` | Keep all inbox apps |
-| `-SkipInboxAppLanguageFix` | Skip the RunOnce winget reinstall of kept inbox apps used to fix inbox app language. No-op when no language pack was applied or `-SkipLanguagePacks` is set |
-| `-Unattended` | No interactive prompts — suitable for automation |
-| `-SCCMImport` | Import the finished WIM into SCCM as an OS Image package |
-| `-SCCMServer` | FQDN of the SCCM site server |
-| `-SCCMSiteCode` | Three-character site code (e.g. `FC1`) |
-| `-SCCMPackagePath` | UNC path where the WIM file will be stored |
-| `-SCCMPackageName` | Package name (pre-rendered; use the GUI template builder for dynamic names) |
-| `-SCCMVersion` | Version string for the OS Image package (optional) |
-| `-SCCMComment` | Description for the OS Image package (optional) |
-| `-SCCMPackageID` | Existing package to update — omit to create a new package |
-| `-SCCMUpdateDPs` | Trigger a distribution point update after import |
-| `-SCCMDPGroup` | Distribution point group to add the package to (`Start-CMContentDistribution`); independent of `-SCCMUpdateDPs` |
-| `-SkipDefenderUpdate | Doesn't download or update Windows Defender on the image.
-| `-DebugBuild` | Extra diagnostics: full DISM output and pending package dumps in log |
-| `-Help` | Show help |                                                                       |
+| `-WimEsdPath` | Folder containing `install.wim`/`install.esd`. Default: `<ScriptRoot>\WimEsd` |
+| `-WimFilePath` | Explicit path to a `.wim`/`.esd` — overrides folder search |
+| `-LanguagesAndOptionalFeaturesPath` | LP/FoD cab folder. Default: `<ScriptRoot>\LanguagesAndOptionalFeatures`. Auto-detects `<WimEsdPath>\LanguagesAndOptionalFeatures` |
+| `-Languages` | Comma-separated 2-letter codes (`ru`, `de,fr`, …). Interactive prompt if omitted |
+| `-OutputPath` | Output WIM (folder = auto-name, or full path with `.wim`) |
+| `-WorkPath` | Work folder for mount + scratch. Default: `<outputDir>\WIMServicing_Work` |
+| `-UpdatePath` | Folder with pre-downloaded `.msu`/`.cab` files. Empty = auto-download |
+| `-AppxListPath` | XML with custom Appx removal list |
+| `-WimIndex` | WIM index. `0` = auto-detect Enterprise |
+| `-FoDList` | Comma-separated FoDs (see catalog above) |
+| `-DriverPath` | Folder to recurse for `.inf` packages to inject |
+| `-DriverListPath` | XML of pre-selected driver INF paths (overrides `-DriverPath`) |
+| `-SkipUpdates` | Skip LCU / checkpoint / .NET CU |
+| `-SkipLanguagePacks` | Skip language pack and `Language.*` FoD injection |
+| `-SkipAppxRemoval` | Keep all provisioned Appx packages |
+| `-SkipDefenderUpdate` | Skip the offline Defender update |
+| `-Unattended` | No interactive prompts |
+| `-DebugBuild` | Extra DISM diagnostics (full stdout to screen and log) |
+| `-Help` | Show help (also `/?`) |
+
+## Offline Defender update
+
+The script downloads Microsoft's `defender-update-kit-amd64.zip` (KB4568292)
+and copies the current platform, engine, and security intelligence into the
+image, so freshly deployed systems don't run inbox Defender binaries until
+their first online update.
+
+- The zip is cached in `Updates\DefenderKit\` and reused on subsequent runs.
+  Delete `defender-update-kit-amd64.zip` to force a fresh download.
+- The kit's cab must carry a **valid Authenticode signature from Microsoft
+  Corporation**, and the cab's `package-defender.xml` arch must match the
+  image arch (x64).
+- A drift-detection hash of Microsoft's `DefenderUpdateWinImage.ps1` (the
+  unsigned body) is compared against a known baseline; a mismatch produces a
+  warning rather than a failure.
+- All Defender failures are **non-fatal**: the build continues without the
+  update, and the DONE summary reports the status.
 
 ## Versions
 
-| Component         | Version                         |
-| ----------------- | -------------------------------- |
-| WimWizard.ps1     | 5.8.1                            |
-| WimWizard-GUI.ps1 | 2.17.3                            |
-| Windows 11 target | 26H2 (26200.x)                 |
+| Component | Version |
+| --- | --- |
+| `WimWizard.ps1` | **7.0.5** |
+| `help.txt` | 7.0.5 |
+| Windows 11 target | **x64**, 24H2 / 25H2 / 26H2 |
+| PowerShell | 5.1+ or 7.x |
+| DISM | Windows 11 / Server 2022 or later |
 
----
+## Changelog
+
+The full version history, including the fork lineage from upstream 5.8.1 →
+7.0.5, is in [CHANGELOG.md](CHANGELOG.md). Highlights of the fork:
+
+- **7.0.5** — output WIM renamed to post-servicing version, `Write-Log` no
+  longer fails when called before the main try block
+- **7.0.4** — `Write-Log` moved to top (no-op until log file set); removed
+  unused variables
+- **7.0.3** — interactive prompts for `LanguagesAndOptionalFeaturesPath`;
+  `-OutputPath` / `-WorkPath` / `-WimFilePath` honored without re-prompt
+- **7.0.2** — fallback search for any `.wim`/`.esd`; version-aware rename
+- **7.0.1** — `Test-LPSourceComplete` pre-flight (metadata + ≥ 43 cabs per locale)
+- **7.0.0** — removed `-PatchExistingWim`, SCCM, ARM64, SafeOS/WinRE, GUI hooks,
+  Inbox App Language Fix; switched from ISO mount to folder-based workflow
 
 ## License
 
-This project is licensed under the **GNU General Public License v3.0**.
-See [LICENSE](https://github.com/TacII/WimWizard/blob/main/LICENSE) for the full text.
+Licensed under the **GNU General Public License v3.0**. See [LICENSE](LICENSE)
+for the full text.
 
----
+The original WimWizard project is © Mathias Haas / TacII, also GPLv3. This fork
+inherits the same license and redistributes under identical terms.
 
-## Author
+## Credits
 
-**Mathias Haas**
-For urgent matters: `bWF0aGlhcy5oYWFzQGZpZGVsaXR5Y29uc3VsdGluZy5zZQ==` *(base64)*
+- **Original project:** [TacII/WimWizard](https://github.com/TacII/WimWizard) by Mathias Haas
+- **Inspiration:** [WIM Witch](https://msendpointmgr.com/wim-witch/) by Donna Ryan
+- **Update catalog module:** [MSCatalogLTS](https://www.powershellgallery.com/packages/MSCatalogLTS) (community)
+
+Changes specific to this fork are documented in [CHANGELOG.md](CHANGELOG.md).

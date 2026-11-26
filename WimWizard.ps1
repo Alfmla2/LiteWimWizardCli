@@ -78,7 +78,7 @@
 .PARAMETER DebugBuild
     Extra DISM diagnostics.
 
-    Version : 7.0.2
+    Version : 7.0.5
     Date    : 2026-11-26
     Requires: Windows PowerShell 5.1+, Administrator, DISM
 
